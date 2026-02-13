@@ -1,0 +1,100 @@
+name: build-mcp-plugin
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "mcp-server/**"
+      - ".github/workflows/build-mcp-plugin.yml"
+  pull_request:
+    paths:
+      - "mcp-server/**"
+      - ".github/workflows/build-mcp-plugin.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_suffix: linux
+          - os: windows-latest
+            artifact_suffix: windows
+          - os: macos-latest
+            artifact_suffix: macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      - name: Download X-Plane SDK 4.2.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sdkZip = Join-Path $env:RUNNER_TEMP "XPSDK420.zip"
+          $sdkDir = Join-Path $env:RUNNER_TEMP "xpsdk420"
+          Invoke-WebRequest `
+            -Uri "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK420.zip" `
+            -OutFile $sdkZip
+          Expand-Archive -Path $sdkZip -DestinationPath $sdkDir -Force
+          "XPLANE_SDK_ROOT=$sdkDir/SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S mcp-server -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DXPLANE_SDK_ROOT=$env:XPLANE_SDK_ROOT"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target xai_mcp_plugin
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-ai-mcp-${{ matrix.artifact_suffix }}
+          path: build/xplane_plugin/**
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Create Release Archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for artifact_dir in release-artifacts/*; do
+            if [ -d "$artifact_dir" ]; then
+              artifact_name="$(basename "$artifact_dir")"
+              (cd "$artifact_dir" && zip -r "../../dist/${artifact_name}.zip" .)
+            fi
+          done
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.zip
