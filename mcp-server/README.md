@@ -67,6 +67,20 @@ Output binary:
 
 - `build/xplane_plugin/<abi>/x-ai.xpl`
 
+## Release Package
+
+Tag pushes matching `v*` publish one merged release asset:
+
+- `x-ai-<tag>.zip` (for example: `x-ai-v0.1.2.zip`)
+
+Archive layout:
+
+- `x-ai/mac_x64/x-ai.xpl`
+- `x-ai/win_x64/x-ai.xpl`
+- `x-ai/lin_x64/x-ai.xpl`
+
+Release packaging fails if any required platform binary is missing.
+
 ## VS Code (Local Build + Debug)
 
 This repo includes ready-to-use VS Code config in `.vscode/`.

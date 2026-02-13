@@ -23,10 +23,13 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_suffix: linux
+            abi: lin_x64
           - os: windows-latest
             artifact_suffix: windows
+            abi: win_x64
           - os: macos-latest
             artifact_suffix: macos
+            abi: mac_x64
 
     runs-on: ${{ matrix.os }}
 
@@ -48,11 +51,35 @@ jobs:
         run: |
           cmake --build build --config Release --target xai_mcp_plugin
 
+      - name: Stage Plugin Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageRoot = "package/x-ai"
+          $abi = "${{ matrix.abi }}"
+          $srcBinary = "build/xplane_plugin/$abi/x-ai.xpl"
+          $dstDir = "$packageRoot/$abi"
+          $dstBinary = "$dstDir/x-ai.xpl"
+
+          New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+
+          $templateDir = "mcp-server/package/x-ai"
+          if (Test-Path $templateDir) {
+            New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+            Get-ChildItem -Path $templateDir -Force | Copy-Item -Destination $packageRoot -Recurse -Force
+          }
+
+          if (-not (Test-Path $srcBinary)) {
+            throw "Expected plugin binary not found: $srcBinary"
+          }
+
+          Copy-Item -Path $srcBinary -Destination $dstBinary -Force
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: x-ai-mcp-${{ matrix.artifact_suffix }}
-          path: build/xplane_plugin/**
+          path: package/x-ai/**
           if-no-files-found: error
 
   release:
@@ -68,20 +95,51 @@ jobs:
         with:
           path: release-artifacts
 
-      - name: Create Release Archives
+      - name: Build Merged Release Zip
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
+          mkdir -p dist/root
+
           for artifact_dir in release-artifacts/*; do
             if [ -d "$artifact_dir" ]; then
-              artifact_name="$(basename "$artifact_dir")"
-              (cd "$artifact_dir" && zip -r "../../dist/${artifact_name}.zip" .)
+              cp -a "$artifact_dir/." dist/root/
             fi
           done
+
+          if [ ! -d "dist/root/x-ai" ]; then
+            mkdir -p dist/root/x-ai
+            shopt -s dotglob nullglob
+            for item in dist/root/*; do
+              base_name="$(basename "$item")"
+              if [ "$base_name" != "x-ai" ]; then
+                mv "$item" dist/root/x-ai/
+              fi
+            done
+            shopt -u dotglob nullglob
+          fi
+
+          required_paths=(
+            "dist/root/x-ai/mac_x64/x-ai.xpl"
+            "dist/root/x-ai/win_x64/x-ai.xpl"
+            "dist/root/x-ai/lin_x64/x-ai.xpl"
+          )
+
+          missing=0
+          for required_path in "${required_paths[@]}"; do
+            if [ ! -f "$required_path" ]; then
+              echo "Missing required release binary: $required_path"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          (cd dist/root && zip -r "../x-ai-${GITHUB_REF_NAME}.zip" x-ai)
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/*.zip
+          files: dist/x-ai-${{ github.ref_name }}.zip
