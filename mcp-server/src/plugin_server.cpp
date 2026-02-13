@@ -21,6 +21,8 @@
 
 namespace {
 
+constexpr float kMainThreadPumpIntervalSeconds = 0.01f;
+
 int read_env_int(const char* name, int fallback) {
     const char* value = std::getenv(name);
     if (!value || value[0] == '\0') {
@@ -291,6 +293,10 @@ bool PluginMcpServer::start() {
         return false;
     }
 
+    // Keep a lightweight main-thread pump active so worker threads never need
+    // to call XPLMScheduleFlightLoop (which must be invoked on the sim thread).
+    XPLMScheduleFlightLoop(flight_loop_id_, -1.0f, 1);
+
     mcp::server::configuration conf;
     conf.host = read_env_string("XAI_MCP_HOST", "127.0.0.1");
     conf.port = read_env_int("XAI_MCP_PORT", 8765);
@@ -366,30 +372,33 @@ void PluginMcpServer::stop() {
 float PluginMcpServer::flight_loop_callback(float, float, int, void* refcon) {
     auto* self = static_cast<PluginMcpServer*>(refcon);
     self->process_pending_jobs();
-    return 0.0f;
+    if (self->shutting_down_.load()) {
+        return 0.0f;
+    }
+    return kMainThreadPumpIntervalSeconds;
 }
 
 void PluginMcpServer::register_tools() {
     server_->register_tool(
-        mcp::tool_builder("xplm.get_versions")
+        mcp::tool_builder("xplm_get_versions")
             .with_description("Get X-Plane version, XPLM version, and host id.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_get_versions(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.get_runtime_info")
+        mcp::tool_builder("xplm_get_runtime_info")
             .with_description("Get runtime information like language, cycle, and elapsed time.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_get_runtime_info(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.get_system_paths")
+        mcp::tool_builder("xplm_get_system_paths")
             .with_description("Get X-Plane system and preferences paths.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_get_system_paths(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.directory_list")
+        mcp::tool_builder("xplm_directory_list")
             .with_description("List directory contents using XPLM path APIs.")
             .with_string_param("path", "Directory path in current XPLM path mode.")
             .with_number_param("offset", "Start index in directory listing.", false)
@@ -398,7 +407,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_directory_list(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.datafile_load")
+        mcp::tool_builder("xplm_datafile_load")
             .with_description("Load an X-Plane data file.")
             .with_string_param("type", "situation|replay")
             .with_string_param("path", "Path relative to X-Plane system directory.")
@@ -406,7 +415,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_datafile_load(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.datafile_save")
+        mcp::tool_builder("xplm_datafile_save")
             .with_description("Save an X-Plane data file.")
             .with_string_param("type", "situation|replay")
             .with_string_param("path", "Path relative to X-Plane system directory.")
@@ -414,40 +423,40 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_datafile_save(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.debug_string")
+        mcp::tool_builder("xplm_debug_string")
             .with_description("Write a line to Log.txt through XPLMDebugString.")
             .with_string_param("message", "Message to write.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_debug_string(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.speak_string")
+        mcp::tool_builder("xplm_speak_string")
             .with_description("Display/speak a message through XPLMSpeakString.")
             .with_string_param("message", "Message to speak.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_speak_string(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.get_virtual_key_description")
+        mcp::tool_builder("xplm_get_virtual_key_description")
             .with_description("Get key description for an XPLM virtual key code.")
             .with_number_param("key", "Virtual key code.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_get_virtual_key_description(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.reload_scenery")
+        mcp::tool_builder("xplm_reload_scenery")
             .with_description("Reload scenery.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_reload_scenery(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.get_self_plugin_info")
+        mcp::tool_builder("xplm_get_self_plugin_info")
             .with_description("Get plugin metadata for this plugin instance.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_get_self_plugin_info(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.plugin_get_info")
+        mcp::tool_builder("xplm_plugin_get_info")
             .with_description("Get plugin info by id, signature, or path. Defaults to current plugin.")
             .with_number_param("id", "Plugin ID.", false)
             .with_string_param("signature", "Plugin signature.", false)
@@ -456,7 +465,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_plugin_get_info(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.plugin_find")
+        mcp::tool_builder("xplm_plugin_find")
             .with_description("Find plugin ID by signature or path.")
             .with_string_param("signature", "Plugin signature.", false)
             .with_string_param("path", "Plugin absolute path.", false)
@@ -464,7 +473,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_plugin_find(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.plugin_set_enabled")
+        mcp::tool_builder("xplm_plugin_set_enabled")
             .with_description("Enable or disable a plugin by ID.")
             .with_number_param("id", "Plugin ID.")
             .with_boolean_param("enabled", "True to enable, false to disable.")
@@ -472,28 +481,28 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_plugin_set_enabled(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.plugin_reload_all")
+        mcp::tool_builder("xplm_plugin_reload_all")
             .with_description("Reload all plugins.")
             .with_boolean_param("confirm", "Must be true to proceed.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_plugin_reload_all(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.list_plugins")
+        mcp::tool_builder("xplm_list_plugins")
             .with_description("List loaded plugins with optional limit.")
             .with_number_param("limit", "Maximum number of plugins to return.", false)
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_list_plugins(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.feature_get")
+        mcp::tool_builder("xplm_feature_get")
             .with_description("Check if an XPLM feature exists and whether it is enabled.")
             .with_string_param("name", "Feature name.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_feature_get(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.feature_set")
+        mcp::tool_builder("xplm_feature_set")
             .with_description("Enable or disable an XPLM feature for this plugin.")
             .with_string_param("name", "Feature name.")
             .with_boolean_param("enabled", "Desired enabled state.")
@@ -501,7 +510,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_feature_set(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.command_execute")
+        mcp::tool_builder("xplm_command_execute")
             .with_description("Execute command by name. action=once|begin|end.")
             .with_string_param("name", "Command name.")
             .with_string_param("action", "once|begin|end")
@@ -511,27 +520,27 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_command_execute(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.object_load")
+        mcp::tool_builder("xplm_object_load")
             .with_description("Load OBJ and return managed object id.")
             .with_string_param("path", "Path relative to X-Plane system folder.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_object_load(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.object_unload")
+        mcp::tool_builder("xplm_object_unload")
             .with_description("Unload managed object by id.")
             .with_number_param("object_id", "Managed object id.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_object_unload(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.object_list")
+        mcp::tool_builder("xplm_object_list")
             .with_description("List loaded managed objects.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_object_list(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.instance_create")
+        mcp::tool_builder("xplm_instance_create")
             .with_description("Create instance from managed object id.")
             .with_number_param("object_id", "Managed object id.")
             .with_array_param("datarefs", "Optional ordered datarefs array.", "string", false)
@@ -539,14 +548,14 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_instance_create(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.instance_destroy")
+        mcp::tool_builder("xplm_instance_destroy")
             .with_description("Destroy managed instance by id.")
             .with_number_param("instance_id", "Managed instance id.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_instance_destroy(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.instance_set_position")
+        mcp::tool_builder("xplm_instance_set_position")
             .with_description("Set instance position and per-instance data.")
             .with_number_param("instance_id", "Managed instance id.")
             .with_number_param("x", "Local X.")
@@ -561,27 +570,27 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_instance_set_position(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.instance_set_auto_shift")
+        mcp::tool_builder("xplm_instance_set_auto_shift")
             .with_description("Enable auto-shift for a managed instance.")
             .with_number_param("instance_id", "Managed instance id.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_instance_set_auto_shift(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.instance_list")
+        mcp::tool_builder("xplm_instance_list")
             .with_description("List managed instances.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_instance_list(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_info")
+        mcp::tool_builder("xplm_dataref_info")
             .with_description("Get DataRef metadata.")
             .with_string_param("name", "DataRef path.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_info(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_list")
+        mcp::tool_builder("xplm_dataref_list")
             .with_description("List DataRefs with pagination.")
             .with_number_param("offset", "Start index.", false)
             .with_number_param("limit", "Maximum number of refs to return.", false)
@@ -589,7 +598,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_list(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_get")
+        mcp::tool_builder("xplm_dataref_get")
             .with_description("Read a scalar numeric DataRef.")
             .with_string_param("name", "DataRef path.")
             .with_string_param("mode", "auto|int|float|double", false)
@@ -597,7 +606,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_get(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_set")
+        mcp::tool_builder("xplm_dataref_set")
             .with_description("Write a scalar numeric DataRef.")
             .with_string_param("name", "DataRef path.")
             .with_number_param("value", "Numeric value to write.")
@@ -606,7 +615,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_set(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_get_array")
+        mcp::tool_builder("xplm_dataref_get_array")
             .with_description("Read int/float array DataRef.")
             .with_string_param("name", "DataRef path.")
             .with_string_param("mode", "int|float", false)
@@ -616,7 +625,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_get_array(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_set_array")
+        mcp::tool_builder("xplm_dataref_set_array")
             .with_description("Write int/float array DataRef.")
             .with_string_param("name", "DataRef path.")
             .with_string_param("mode", "int|float", false)
@@ -626,7 +635,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_set_array(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_get_bytes")
+        mcp::tool_builder("xplm_dataref_get_bytes")
             .with_description("Read byte data from a DataRef and return hex.")
             .with_string_param("name", "DataRef path.")
             .with_number_param("offset", "Byte offset.", false)
@@ -635,7 +644,7 @@ void PluginMcpServer::register_tools() {
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_get_bytes(params); });
 
     server_->register_tool(
-        mcp::tool_builder("xplm.dataref_set_bytes")
+        mcp::tool_builder("xplm_dataref_set_bytes")
             .with_description("Write byte data to a DataRef from hex string.")
             .with_string_param("name", "DataRef path.")
             .with_string_param("hex", "Byte payload as hex.")
@@ -1779,10 +1788,6 @@ mcp::json PluginMcpServer::run_on_main_thread(std::function<mcp::json()> fn) {
     {
         std::lock_guard<std::mutex> lock(jobs_mutex_);
         jobs_.push(job);
-    }
-
-    if (flight_loop_id_) {
-        XPLMScheduleFlightLoop(flight_loop_id_, -1.0f, 1);
     }
 
     if (result.wait_for(std::chrono::seconds(3)) == std::future_status::timeout) {

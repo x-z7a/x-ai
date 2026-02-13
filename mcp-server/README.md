@@ -5,47 +5,48 @@ This project builds an X-Plane plugin that embeds a `cpp-mcp` server and exposes
 ## What It Exposes
 
 - Runtime/system:
-  - `xplm.get_versions`
-  - `xplm.get_runtime_info`
-  - `xplm.get_system_paths`
-  - `xplm.directory_list`
-  - `xplm.datafile_load`
-  - `xplm.datafile_save`
-  - `xplm.debug_string`
-  - `xplm.speak_string`
-  - `xplm.get_virtual_key_description`
-  - `xplm.reload_scenery`
+  - `xplm_get_versions`
+  - `xplm_get_runtime_info`
+  - `xplm_get_system_paths`
+  - `xplm_directory_list`
+  - `xplm_datafile_load`
+  - `xplm_datafile_save`
+  - `xplm_debug_string`
+  - `xplm_speak_string`
+  - `xplm_get_virtual_key_description`
+  - `xplm_reload_scenery`
 - Plugin management:
-  - `xplm.get_self_plugin_info`
-  - `xplm.plugin_get_info`
-  - `xplm.plugin_find`
-  - `xplm.plugin_set_enabled`
-  - `xplm.plugin_reload_all` (requires `confirm=true`)
-  - `xplm.list_plugins`
-  - `xplm.feature_get`
-  - `xplm.feature_set`
+  - `xplm_get_self_plugin_info`
+  - `xplm_plugin_get_info`
+  - `xplm_plugin_find`
+  - `xplm_plugin_set_enabled`
+  - `xplm_plugin_reload_all` (requires `confirm=true`)
+  - `xplm_list_plugins`
+  - `xplm_feature_get`
+  - `xplm_feature_set`
 - Commands:
-  - `xplm.command_execute` (`once|begin|end`, optional create-if-missing)
+  - `xplm_command_execute` (`once|begin|end`, optional create-if-missing)
 - Objects/instances:
-  - `xplm.object_load`
-  - `xplm.object_unload`
-  - `xplm.object_list`
-  - `xplm.instance_create`
-  - `xplm.instance_destroy`
-  - `xplm.instance_set_position`
-  - `xplm.instance_set_auto_shift`
-  - `xplm.instance_list`
+  - `xplm_object_load`
+  - `xplm_object_unload`
+  - `xplm_object_list`
+  - `xplm_instance_create`
+  - `xplm_instance_destroy`
+  - `xplm_instance_set_position`
+  - `xplm_instance_set_auto_shift`
+  - `xplm_instance_list`
 - DataRefs:
-  - `xplm.dataref_info`
-  - `xplm.dataref_list`
-  - `xplm.dataref_get`
-  - `xplm.dataref_set`
-  - `xplm.dataref_get_array`
-  - `xplm.dataref_set_array`
-  - `xplm.dataref_get_bytes`
-  - `xplm.dataref_set_bytes`
+  - `xplm_dataref_info`
+  - `xplm_dataref_list`
+  - `xplm_dataref_get`
+  - `xplm_dataref_set`
+  - `xplm_dataref_get_array`
+  - `xplm_dataref_set_array`
+  - `xplm_dataref_get_bytes`
+  - `xplm_dataref_set_bytes`
 
 All XPLM calls are marshaled onto the X-Plane main thread via a flight-loop queue for thread safety.
+Canonical MCP tool IDs use underscores (for client compatibility). Legacy dotted calls such as `xplm.dataref_get` are accepted for backward compatibility.
 
 ## Build Locally
 
@@ -64,7 +65,7 @@ cmake --build build --target xai_mcp_plugin
 
 Output binary:
 
-- `build/xplane_plugin/<abi>/x-ai-mcp.xpl`
+- `build/xplane_plugin/<abi>/x-ai.xpl`
 
 ## VS Code (Local Build + Debug)
 
@@ -77,7 +78,7 @@ This repo includes ready-to-use VS Code config in `.vscode/`.
 2. Optional: set deploy target plugin directory (for auto-copy before debug attach):
 
 ```bash
-export XPLANE_PLUGIN_DIR="/absolute/path/to/X-Plane 12/Resources/plugins/x-ai-mcp"
+export XPLANE_PLUGIN_DIR="/absolute/path/to/X-Plane 12/Resources/plugins/x-ai"
 ```
 
 3. Build:
@@ -86,6 +87,21 @@ export XPLANE_PLUGIN_DIR="/absolute/path/to/X-Plane 12/Resources/plugins/x-ai-mc
    - Start X-Plane.
    - Run launch config `Attach to X-Plane (Build + Deploy)` (or `Build Only`).
    - Pick the X-Plane process when prompted.
+
+5. MCP client connection (VS Code / clients using `mcp.json`):
+
+```json
+{
+  "servers": {
+    "xplane MCP": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8765/sse"
+    }
+  }
+}
+```
+
+The embedded `cpp-mcp` server uses legacy SSE transport (`/sse` + `/message`), not streamable HTTP at `/`.
 
 ## Runtime Configuration
 
@@ -102,4 +118,5 @@ XAI_MCP_HOST=0.0.0.0 XAI_MCP_PORT=9000
 
 - `cpp-mcp` is fetched during CMake configure via `FetchContent`.
 - `cpp-mcp` commit pin: `dc86c91f587e3a950a996d4fe6f8a0e2f5e9590d`.
+- Configure applies a compatibility patch so the embedded server accepts MCP protocol `2024-11-05` and `2025-11-25`.
 - The plugin now exposes a broad non-callback SDK surface intended for external automation agents.

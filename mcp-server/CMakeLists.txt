@@ -8,6 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(XAI_MCP_PLUGIN_FETCH_CPP_MCP "Fetch and build cpp-mcp automatically." ON)
 set(CPP_MCP_GIT_TAG "dc86c91f587e3a950a996d4fe6f8a0e2f5e9590d" CACHE STRING "cpp-mcp git tag or commit.")
+option(XAI_MCP_PLUGIN_PATCH_CPP_MCP_COMPAT "Patch cpp-mcp for MCP protocol/version compatibility and legacy dotted tool-name compatibility." ON)
 
 option(XAI_MCP_PLUGIN_AUTO_DOWNLOAD_XPSDK "Auto-download X-Plane SDK during configure if XPLANE_SDK_ROOT is missing." ON)
 set(XAI_MCP_PLUGIN_XPSDK_URL "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK420.zip" CACHE STRING "X-Plane SDK zip URL.")
@@ -104,6 +105,48 @@ if(XAI_MCP_PLUGIN_FETCH_CPP_MCP)
     set(MCP_SSL OFF CACHE BOOL "" FORCE)
 
     FetchContent_MakeAvailable(cpp_mcp)
+
+    if(XAI_MCP_PLUGIN_PATCH_CPP_MCP_COMPAT)
+        set(_xai_cpp_mcp_server_cpp "${cpp_mcp_SOURCE_DIR}/src/mcp_server.cpp")
+        if(EXISTS "${_xai_cpp_mcp_server_cpp}")
+            file(READ "${_xai_cpp_mcp_server_cpp}" _xai_cpp_mcp_server_src)
+            set(_xai_cpp_mcp_server_src_patched "${_xai_cpp_mcp_server_src}")
+
+            string(REPLACE
+                "if (requested_version != MCP_VERSION) {"
+                "if (requested_version != MCP_VERSION && requested_version != \"2025-11-25\") {"
+                _xai_cpp_mcp_server_src_patched
+                "${_xai_cpp_mcp_server_src_patched}"
+            )
+            string(REPLACE
+                "{\"supported\", {MCP_VERSION}},"
+                "{\"supported\", {MCP_VERSION, \"2025-11-25\"}},"
+                _xai_cpp_mcp_server_src_patched
+                "${_xai_cpp_mcp_server_src_patched}"
+            )
+            string(REPLACE
+                "{\"protocolVersion\", MCP_VERSION},"
+                "{\"protocolVersion\", requested_version},"
+                _xai_cpp_mcp_server_src_patched
+                "${_xai_cpp_mcp_server_src_patched}"
+            )
+            string(REPLACE
+                "            auto it = tools_.find(tool_name);\n            if (it == tools_.end()) {\n                throw mcp_exception(error_code::invalid_params, \"Tool not found: \" + tool_name);\n            }\n"
+                "            auto it = tools_.find(tool_name);\n            if (it == tools_.end()) {\n                std::string compat_tool_name = tool_name;\n                for (char& ch : compat_tool_name) {\n                    if (ch == '.') {\n                        ch = '_';\n                    }\n                }\n                if (compat_tool_name != tool_name) {\n                    it = tools_.find(compat_tool_name);\n                }\n            }\n            if (it == tools_.end()) {\n                throw mcp_exception(error_code::invalid_params, \"Tool not found: \" + tool_name);\n            }\n"
+                _xai_cpp_mcp_server_src_patched
+                "${_xai_cpp_mcp_server_src_patched}"
+            )
+
+            if(NOT _xai_cpp_mcp_server_src STREQUAL _xai_cpp_mcp_server_src_patched)
+                file(WRITE "${_xai_cpp_mcp_server_cpp}" "${_xai_cpp_mcp_server_src_patched}")
+                message(STATUS "Applied cpp-mcp compatibility patch (protocol 2024-11-05/2025-11-25 + dotted tool-name fallback).")
+            else()
+                message(STATUS "cpp-mcp compatibility patch skipped (already applied or upstream changed).")
+            endif()
+        else()
+            message(WARNING "cpp-mcp source file not found for compatibility patch: ${_xai_cpp_mcp_server_cpp}")
+        endif()
+    endif()
 else()
     message(FATAL_ERROR "XAI_MCP_PLUGIN_FETCH_CPP_MCP=OFF is not yet supported.")
 endif()
