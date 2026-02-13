@@ -37,24 +37,11 @@ jobs:
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v4
 
-      - name: Download X-Plane SDK 4.2.0
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $sdkZip = Join-Path $env:RUNNER_TEMP "XPSDK420.zip"
-          $sdkDir = Join-Path $env:RUNNER_TEMP "xpsdk420"
-          Invoke-WebRequest `
-            -Uri "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK420.zip" `
-            -OutFile $sdkZip
-          Expand-Archive -Path $sdkZip -DestinationPath $sdkDir -Force
-          "XPLANE_SDK_ROOT=$sdkDir/SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Configure
         shell: pwsh
         run: |
           cmake -S mcp-server -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            "-DXPLANE_SDK_ROOT=$env:XPLANE_SDK_ROOT"
+            -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         shell: pwsh

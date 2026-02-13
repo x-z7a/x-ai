@@ -9,13 +9,85 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(XAI_MCP_PLUGIN_FETCH_CPP_MCP "Fetch and build cpp-mcp automatically." ON)
 set(CPP_MCP_GIT_TAG "dc86c91f587e3a950a996d4fe6f8a0e2f5e9590d" CACHE STRING "cpp-mcp git tag or commit.")
 
+option(XAI_MCP_PLUGIN_AUTO_DOWNLOAD_XPSDK "Auto-download X-Plane SDK during configure if XPLANE_SDK_ROOT is missing." ON)
+set(XAI_MCP_PLUGIN_XPSDK_URL "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK420.zip" CACHE STRING "X-Plane SDK zip URL.")
+set(XAI_MCP_PLUGIN_XPSDK_CACHE_DIR "${CMAKE_BINARY_DIR}/_deps/xpsdk" CACHE PATH "Directory where auto-downloaded X-Plane SDK files are stored.")
+set(XAI_MCP_PLUGIN_XPSDK_ZIP_PATH "" CACHE FILEPATH "Optional path to an existing X-Plane SDK zip file.")
+
 set(XPLANE_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/XPSDK/SDK" CACHE PATH "Path to X-Plane SDK root (contains CHeaders and Libraries).")
 
 if(NOT EXISTS "${XPLANE_SDK_ROOT}/CHeaders/XPLM/XPLMDefs.h")
-    message(FATAL_ERROR
-        "X-Plane SDK not found.\n"
-        "Set XPLANE_SDK_ROOT to the extracted SDK directory.\n"
-        "Expected file: ${XPLANE_SDK_ROOT}/CHeaders/XPLM/XPLMDefs.h")
+    if(XAI_MCP_PLUGIN_AUTO_DOWNLOAD_XPSDK)
+        file(MAKE_DIRECTORY "${XAI_MCP_PLUGIN_XPSDK_CACHE_DIR}")
+        if(XAI_MCP_PLUGIN_XPSDK_ZIP_PATH)
+            set(_xpsdk_zip "${XAI_MCP_PLUGIN_XPSDK_ZIP_PATH}")
+        else()
+            set(_xpsdk_zip "${XAI_MCP_PLUGIN_XPSDK_CACHE_DIR}/XPSDK420.zip")
+        endif()
+        set(_xpsdk_extract_dir "${XAI_MCP_PLUGIN_XPSDK_CACHE_DIR}/unpacked")
+        set(_xpsdk_root_candidate "${_xpsdk_extract_dir}/SDK")
+
+        if(NOT EXISTS "${_xpsdk_zip}")
+            message(STATUS "Downloading X-Plane SDK from ${XAI_MCP_PLUGIN_XPSDK_URL}")
+            find_program(_xpsdk_curl curl)
+            if(_xpsdk_curl)
+                execute_process(
+                    COMMAND "${_xpsdk_curl}" -L --fail --output "${_xpsdk_zip}" "${XAI_MCP_PLUGIN_XPSDK_URL}"
+                    RESULT_VARIABLE _xpsdk_download_code
+                    OUTPUT_VARIABLE _xpsdk_download_stdout
+                    ERROR_VARIABLE _xpsdk_download_stderr
+                )
+                if(NOT _xpsdk_download_code EQUAL 0)
+                    message(FATAL_ERROR
+                        "Failed to download X-Plane SDK with curl.\n"
+                        "URL: ${XAI_MCP_PLUGIN_XPSDK_URL}\n"
+                        "Code: ${_xpsdk_download_code}\n"
+                        "Details: ${_xpsdk_download_stderr}")
+                endif()
+            else()
+                file(DOWNLOAD
+                    "${XAI_MCP_PLUGIN_XPSDK_URL}"
+                    "${_xpsdk_zip}"
+                    SHOW_PROGRESS
+                    STATUS _xpsdk_download_status
+                    TLS_VERIFY ON
+                )
+                list(GET _xpsdk_download_status 0 _xpsdk_download_code)
+                list(GET _xpsdk_download_status 1 _xpsdk_download_message)
+                if(NOT _xpsdk_download_code EQUAL 0)
+                    message(FATAL_ERROR
+                        "Failed to download X-Plane SDK.\n"
+                        "URL: ${XAI_MCP_PLUGIN_XPSDK_URL}\n"
+                        "Status: ${_xpsdk_download_code}\n"
+                        "Message: ${_xpsdk_download_message}")
+                endif()
+            endif()
+        endif()
+
+        if(NOT EXISTS "${_xpsdk_root_candidate}/CHeaders/XPLM/XPLMDefs.h")
+            message(STATUS "Extracting X-Plane SDK from ${_xpsdk_zip}")
+            file(REMOVE_RECURSE "${_xpsdk_extract_dir}")
+            file(MAKE_DIRECTORY "${_xpsdk_extract_dir}")
+            file(ARCHIVE_EXTRACT
+                INPUT "${_xpsdk_zip}"
+                DESTINATION "${_xpsdk_extract_dir}"
+            )
+        endif()
+
+        if(EXISTS "${_xpsdk_root_candidate}/CHeaders/XPLM/XPLMDefs.h")
+            set(XPLANE_SDK_ROOT "${_xpsdk_root_candidate}" CACHE PATH "Path to X-Plane SDK root (contains CHeaders and Libraries)." FORCE)
+            message(STATUS "Using auto-downloaded X-Plane SDK at: ${XPLANE_SDK_ROOT}")
+        else()
+            message(FATAL_ERROR
+                "X-Plane SDK extraction did not produce expected layout.\n"
+                "Expected: ${_xpsdk_root_candidate}/CHeaders/XPLM/XPLMDefs.h")
+        endif()
+    else()
+        message(FATAL_ERROR
+            "X-Plane SDK not found.\n"
+            "Set XPLANE_SDK_ROOT to the extracted SDK directory or enable XAI_MCP_PLUGIN_AUTO_DOWNLOAD_XPSDK.\n"
+            "Expected file: ${XPLANE_SDK_ROOT}/CHeaders/XPLM/XPLMDefs.h")
+    endif()
 endif()
 
 include(FetchContent)
@@ -93,7 +165,7 @@ endif()
 set(XAI_PLUGIN_OUTPUT_DIR "${CMAKE_BINARY_DIR}/xplane_plugin/${XAI_PLUGIN_ABI}")
 
 set_target_properties(xai_mcp_plugin PROPERTIES
-    OUTPUT_NAME "x-ai-mcp"
+    OUTPUT_NAME "x-ai"
     PREFIX ""
     SUFFIX ".xpl"
     LIBRARY_OUTPUT_DIRECTORY "${XAI_PLUGIN_OUTPUT_DIR}"

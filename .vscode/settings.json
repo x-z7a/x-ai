@@ -1,0 +1,10 @@
+{
+  "cmake.sourceDirectory": "${workspaceFolder}/mcp-server",
+  "cmake.generator": "Ninja",
+  "cmake.buildDirectory": "${workspaceFolder}/build/${buildType}",
+  "cmake.configureOnOpen": false,
+  "cmake.configureSettings": {
+    "CMAKE_BUILD_TYPE": "Debug"
+  },
+  "cmake.buildTask": "CMake: Build Plugin (Debug)"
+}

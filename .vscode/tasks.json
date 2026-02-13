@@ -1,0 +1,31 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: Configure (Debug)",
+      "type": "shell",
+      "command": "cmake -S mcp-server -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug",
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: Build Plugin (Debug)",
+      "type": "shell",
+      "command": "cmake --build build/debug --target xai_mcp_plugin",
+      "dependsOn": "CMake: Configure (Debug)",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "CMake: Deploy Plugin (Debug)",
+      "type": "shell",
+      "command": "export XPLANE_PLUGIN_DIR='/Volumes/storage/X-Plane 12/Resources/plugins/x-ai';bash -lc 'set -euo pipefail; test -n \"${XPLANE_PLUGIN_DIR:-}\"; cmake -E remove_directory \"${XPLANE_PLUGIN_DIR}\"; cmake -E make_directory \"${XPLANE_PLUGIN_DIR}\"; cmake -E copy_directory \"${PWD}/build/debug/xplane_plugin\" \"${XPLANE_PLUGIN_DIR}\"'",
+      "dependsOn": "CMake: Build Plugin (Debug)",
+      "problemMatcher": []
+    }
+  ]
+}

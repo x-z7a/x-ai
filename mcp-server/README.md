@@ -49,20 +49,43 @@ All XPLM calls are marshaled onto the X-Plane main thread via a flight-loop queu
 
 ## Build Locally
 
-1. Download and extract the SDK:
-   - `https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK420.zip`
-2. Configure and build:
+1. Configure and build (SDK auto-download is enabled by default):
 
 ```bash
 cmake -S mcp-server -B build \
-  -DXPLANE_SDK_ROOT=/path/to/SDK \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target xai_mcp_plugin
 ```
 
+2. Optional overrides:
+   - Use a pre-installed SDK: `-DXPLANE_SDK_ROOT=/path/to/SDK`
+   - Use a local SDK zip: `-DXAI_MCP_PLUGIN_XPSDK_ZIP_PATH=/path/to/XPSDK420.zip`
+   - Disable auto-download entirely: `-DXAI_MCP_PLUGIN_AUTO_DOWNLOAD_XPSDK=OFF`
+
 Output binary:
 
 - `build/xplane_plugin/<abi>/x-ai-mcp.xpl`
+
+## VS Code (Local Build + Debug)
+
+This repo includes ready-to-use VS Code config in `.vscode/`.
+
+1. Install recommended extensions:
+   - CMake Tools
+   - C/C++
+   - CodeLLDB
+2. Optional: set deploy target plugin directory (for auto-copy before debug attach):
+
+```bash
+export XPLANE_PLUGIN_DIR="/absolute/path/to/X-Plane 12/Resources/plugins/x-ai-mcp"
+```
+
+3. Build:
+   - Run task `CMake: Build Plugin (Debug)` from `Terminal -> Run Task`.
+4. Debug:
+   - Start X-Plane.
+   - Run launch config `Attach to X-Plane (Build + Deploy)` (or `Build Only`).
+   - Pick the X-Plane process when prompted.
 
 ## Runtime Configuration
 
