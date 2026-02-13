@@ -8,6 +8,10 @@ This project builds an X-Plane plugin that embeds a `cpp-mcp` server and exposes
   - `xplm_get_versions`
   - `xplm_get_runtime_info`
   - `xplm_get_system_paths`
+  - `xplm_path_get_system`
+  - `xplm_path_get_prefs`
+  - `xplm_path_get_separator`
+  - `xplm_path_extract_file_and_path`
   - `xplm_directory_list`
   - `xplm_datafile_load`
   - `xplm_datafile_save`
@@ -15,6 +19,22 @@ This project builds an X-Plane plugin that embeds a `cpp-mcp` server and exposes
   - `xplm_speak_string`
   - `xplm_get_virtual_key_description`
   - `xplm_reload_scenery`
+- Navigation/GPS:
+  - `xplm_nav_list`
+  - `xplm_nav_info`
+  - `xplm_nav_find`
+  - `xplm_nav_find_first_of_type`
+  - `xplm_nav_find_last_of_type`
+  - `xplm_nav_next`
+  - `xplm_gps_destination`
+- FMS:
+  - `xplm_fms_status`
+  - `xplm_fms_entry_get`
+  - `xplm_fms_entry_set_nav`
+  - `xplm_fms_entry_set_latlon`
+  - `xplm_fms_entry_clear`
+  - `xplm_fms_entry_set_displayed`
+  - `xplm_fms_entry_set_destination`
 - Plugin management:
   - `xplm_get_self_plugin_info`
   - `xplm_plugin_get_info`
