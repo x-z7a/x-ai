@@ -298,7 +298,7 @@ bool PluginMcpServer::start() {
     XPLMScheduleFlightLoop(flight_loop_id_, -1.0f, 1);
 
     mcp::server::configuration conf;
-    conf.host = read_env_string("XAI_MCP_HOST", "127.0.0.1");
+    conf.host = read_env_string("XAI_MCP_HOST", "0.0.0.0");
     conf.port = read_env_int("XAI_MCP_PORT", 8765);
     conf.name = "x-ai-xplane-mcp";
     conf.version = kServerVersion;
