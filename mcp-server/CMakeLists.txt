@@ -154,6 +154,12 @@ endif()
 add_library(xai_mcp_plugin SHARED
     src/plugin_main.cpp
     src/plugin_server.cpp
+    src/server/tool_common.cpp
+    src/server/plugin_server_runtime.cpp
+    src/server/plugin_server_navigation.cpp
+    src/server/plugin_server_plugins.cpp
+    src/server/plugin_server_objects.cpp
+    src/server/plugin_server_datarefs.cpp
 )
 
 target_include_directories(xai_mcp_plugin PRIVATE
