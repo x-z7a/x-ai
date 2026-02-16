@@ -4,9 +4,12 @@
 
 #include "mcp_tool.h"
 
+#include "XPLMDataAccess.h"
+#include "XPLMNavigation.h"
 #include "XPLMUtilities.h"
 
 #include <algorithm>
+#include <array>
 #include <vector>
 
 namespace {
@@ -21,9 +24,174 @@ XPLMDataFileType parse_data_file_type(const std::string& value) {
     throw mcp::mcp_exception(mcp::error_code::invalid_params, "type must be one of: situation, replay");
 }
 
+enum class NumericPreference {
+    kInt,
+    kFloat,
+    kDouble
+};
+
+struct AircraftStateField {
+    const char* key;
+    const char* dataref;
+    NumericPreference preference;
+    bool as_bool;
+};
+
+constexpr std::array<AircraftStateField, 11> kAircraftStateFields = {{
+    {"latitude", "sim/flightmodel/position/latitude", NumericPreference::kDouble, false},
+    {"longitude", "sim/flightmodel/position/longitude", NumericPreference::kDouble, false},
+    {"elevation_m", "sim/flightmodel/position/elevation", NumericPreference::kFloat, false},
+    {"groundspeed_m_s", "sim/flightmodel/position/groundspeed", NumericPreference::kFloat, false},
+    {"indicated_airspeed_kt", "sim/cockpit2/gauges/indicators/airspeed_kts_pilot", NumericPreference::kFloat, false},
+    {"heading_true_deg", "sim/flightmodel/position/true_psi", NumericPreference::kFloat, false},
+    {"vertical_speed_fpm", "sim/flightmodel/position/vh_ind_fpm", NumericPreference::kFloat, false},
+    {"com1_hz", "sim/cockpit2/radios/actuators/com1_frequency_hz_833", NumericPreference::kInt, false},
+    {"transponder_code", "sim/cockpit2/radios/actuators/transponder_code", NumericPreference::kInt, false},
+    {"on_ground", "sim/flightmodel/failures/onground_any", NumericPreference::kInt, true},
+    {"magnetic_heading_deg", "sim/flightmodel/position/mag_psi", NumericPreference::kFloat, false}
+}};
+
+bool supports_type(int type_bits, int type_flag) {
+    return (type_bits & type_flag) != 0;
+}
+
+double read_numeric_dataref_value(XPLMDataRef ref, NumericPreference preference) {
+    const int type_bits = XPLMGetDataRefTypes(ref);
+
+    if (preference == NumericPreference::kDouble && supports_type(type_bits, xplmType_Double)) {
+        return XPLMGetDatad(ref);
+    }
+    if (preference == NumericPreference::kFloat && supports_type(type_bits, xplmType_Float)) {
+        return XPLMGetDataf(ref);
+    }
+    if (preference == NumericPreference::kInt && supports_type(type_bits, xplmType_Int)) {
+        return static_cast<double>(XPLMGetDatai(ref));
+    }
+
+    if (supports_type(type_bits, xplmType_Double)) {
+        return XPLMGetDatad(ref);
+    }
+    if (supports_type(type_bits, xplmType_Float)) {
+        return XPLMGetDataf(ref);
+    }
+    if (supports_type(type_bits, xplmType_Int)) {
+        return static_cast<double>(XPLMGetDatai(ref));
+    }
+
+    throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef does not expose scalar numeric data.");
+}
+
+mcp::json read_aircraft_state_snapshot() {
+    mcp::json payload = mcp::json::object();
+    mcp::json missing_datarefs = mcp::json::array();
+
+    for (const auto& field : kAircraftStateFields) {
+        const XPLMDataRef ref = XPLMFindDataRef(field.dataref);
+        if (!ref) {
+            missing_datarefs.push_back({
+                {"key", field.key},
+                {"dataref", field.dataref},
+                {"error", "DataRef not found"}
+            });
+            continue;
+        }
+
+        try {
+            const double value = read_numeric_dataref_value(ref, field.preference);
+            if (field.as_bool) {
+                payload[field.key] = (value != 0.0);
+            } else {
+                payload[field.key] = value;
+            }
+        } catch (const std::exception& exc) {
+            missing_datarefs.push_back({
+                {"key", field.key},
+                {"dataref", field.dataref},
+                {"error", exc.what()}
+            });
+        }
+    }
+
+    XPLMNavType destination_type = XPLMGetGPSDestinationType();
+    XPLMNavRef destination_ref = XPLMGetGPSDestination();
+    mcp::json gps_destination = {
+        {"destination_type_bit", destination_type},
+        {"destination_ref", destination_ref},
+        {"has_destination", destination_ref != XPLM_NAV_NOT_FOUND}
+    };
+    if (destination_ref != XPLM_NAV_NOT_FOUND) {
+        XPLMNavType nav_type = xplm_Nav_Unknown;
+        float latitude = 0.0f;
+        float longitude = 0.0f;
+        float height = 0.0f;
+        int frequency = 0;
+        float heading = 0.0f;
+        char id[64] = {};
+        char name[256] = {};
+        char in_region = 0;
+
+        XPLMGetNavAidInfo(
+            destination_ref,
+            &nav_type,
+            &latitude,
+            &longitude,
+            &height,
+            &frequency,
+            &heading,
+            id,
+            name,
+            &in_region
+        );
+
+        gps_destination["destination"] = {
+            {"nav_ref", destination_ref},
+            {"type_bit", nav_type},
+            {"latitude", latitude},
+            {"longitude", longitude},
+            {"height", height},
+            {"frequency", frequency},
+            {"heading", heading},
+            {"id", id},
+            {"name", name},
+            {"in_region", in_region != 0}
+        };
+    }
+    payload["gps_destination"] = gps_destination;
+
+    int xplane_version = 0;
+    int xplm_version = 0;
+    XPLMHostApplicationID host_id = xplm_Host_Unknown;
+    XPLMGetVersions(&xplane_version, &xplm_version, &host_id);
+    payload["runtime"] = {
+        {"xplane_version", xplane_version},
+        {"xplm_version", xplm_version},
+        {"host_id", host_id},
+        {"language", XPLMGetLanguage()},
+        {"cycle_number", XPLMGetCycleNumber()},
+        {"elapsed_time_sec", XPLMGetElapsedTime()}
+    };
+
+    payload["missing_datarefs"] = missing_datarefs;
+    payload["complete"] = missing_datarefs.empty();
+
+    return payload;
+}
+
 }  // namespace
 
 namespace xai_mcp {
+
+void PluginMcpServer::refresh_aircraft_state_cache_main_thread() {
+    mcp::json snapshot = read_aircraft_state_snapshot();
+    std::lock_guard<std::mutex> lock(aircraft_state_mutex_);
+    aircraft_state_cache_ = std::move(snapshot);
+    aircraft_state_cache_ready_ = true;
+}
+
+mcp::json PluginMcpServer::get_aircraft_state_cache() const {
+    std::lock_guard<std::mutex> lock(aircraft_state_mutex_);
+    return aircraft_state_cache_;
+}
 
 void PluginMcpServer::register_runtime_tools() {
     server_->register_tool(
@@ -37,6 +205,12 @@ void PluginMcpServer::register_runtime_tools() {
             .with_description("Get runtime information like language, cycle, and elapsed time.")
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_get_runtime_info(params); });
+
+    server_->register_tool(
+        mcp::tool_builder("fetch_aircraft_state")
+            .with_description("Get current ATC aircraft state snapshot including GPS coordinates.")
+            .build(),
+        [this](const mcp::json& params, const std::string&) { return this->tool_fetch_aircraft_state(params); });
 
     server_->register_tool(
         mcp::tool_builder("xplm_get_system_paths")
@@ -156,6 +330,11 @@ mcp::json PluginMcpServer::tool_get_runtime_info(const mcp::json& raw_params) {
             {"elapsed_time_sec", XPLMGetElapsedTime()}
         });
     });
+}
+
+mcp::json PluginMcpServer::tool_fetch_aircraft_state(const mcp::json& raw_params) {
+    (void)normalize_params(raw_params);
+    return text_content(get_aircraft_state_cache());
 }
 
 mcp::json PluginMcpServer::tool_get_system_paths(const mcp::json& raw_params) {

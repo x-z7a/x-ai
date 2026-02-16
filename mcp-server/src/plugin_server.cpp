@@ -10,6 +10,7 @@
 namespace {
 
 constexpr float kMainThreadPumpIntervalSeconds = 0.01f;
+constexpr float kAircraftStateUpdateIntervalSeconds = 0.1f;
 
 int read_env_int(const char* name, int fallback) {
     const char* value = std::getenv(name);
@@ -80,6 +81,8 @@ bool PluginMcpServer::start() {
     });
 
     register_tools();
+    aircraft_state_update_elapsed_sec_ = 0.0f;
+    refresh_aircraft_state_cache_main_thread();
 
     if (!server_->start(false)) {
         server_.reset();
@@ -134,16 +137,32 @@ void PluginMcpServer::stop() {
         flight_loop_id_ = nullptr;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(aircraft_state_mutex_);
+        aircraft_state_cache_ = mcp::json::object();
+        aircraft_state_cache_ready_ = false;
+    }
+    aircraft_state_update_elapsed_sec_ = 0.0f;
+
     running_.store(false);
     log_line("MCP server stopped.");
 }
 
-float PluginMcpServer::flight_loop_callback(float, float, int, void* refcon) {
+float PluginMcpServer::flight_loop_callback(float elapsed_since_last_call, float, int, void* refcon) {
     auto* self = static_cast<PluginMcpServer*>(refcon);
     self->process_pending_jobs();
     if (self->shutting_down_.load()) {
         return 0.0f;
     }
+
+    if (elapsed_since_last_call > 0.0f) {
+        self->aircraft_state_update_elapsed_sec_ += elapsed_since_last_call;
+    }
+    if (!self->aircraft_state_cache_ready_ || self->aircraft_state_update_elapsed_sec_ >= kAircraftStateUpdateIntervalSeconds) {
+        self->refresh_aircraft_state_cache_main_thread();
+        self->aircraft_state_update_elapsed_sec_ = 0.0f;
+    }
+
     return kMainThreadPumpIntervalSeconds;
 }
 

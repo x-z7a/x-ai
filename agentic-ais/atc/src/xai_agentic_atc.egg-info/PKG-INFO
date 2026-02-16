@@ -1,0 +1,89 @@
+Metadata-Version: 2.4
+Name: xai-agentic-atc
+Version: 0.1.0
+Summary: Agentic ATC prototype for X-Plane MCP using AutoGen + GitHub Copilot SDK.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: autogen-agentchat<0.8.0,>=0.7.5
+Requires-Dist: autogen-ext[openai]<0.8.0,>=0.7.5
+Requires-Dist: github-copilot-sdk<0.2.0,>=0.1.1
+Requires-Dist: mcp<2.0.0,>=1.13.1
+Requires-Dist: pydantic<3.0.0,>=2.11.0
+Requires-Dist: python-dotenv<2.0.0,>=1.1.0
+
+# Agentic ATC (AutoGen + GitHub Copilot SDK + X-Plane MCP)
+
+This directory contains a prototype ATC agent stack that:
+
+1. Fetches sim state from X-Plane MCP (`xplm_dataref_get`, nav/runtime tools).
+2. Consults specialist experts powered by GitHub Copilot SDK.
+3. Coordinates decisions with an AutoGen controller agent.
+4. Talks back through X-Plane MCP (`xplm_speak_string`).
+
+## Layout
+
+- `src/atc_ai/xplane_mcp.py`: SSE MCP client and tool call helpers.
+- `src/atc_ai/copilot_experts.py`: phraseology/flow/safety experts using Copilot SDK.
+- `src/atc_ai/atc_tools.py`: tool surface exposed to the AutoGen controller.
+- `src/atc_ai/runtime.py`: AutoGen coordinator setup and execution.
+- `src/atc_ai/main.py`: CLI entrypoint.
+
+## Quick Start
+
+1. Create a virtualenv and install:
+
+```bash
+cd agentic-ais/atc
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+2. Configure environment:
+
+```bash
+cp .env.example .env
+# edit .env values
+```
+
+Required env values:
+
+- `GITHUB_TOKEN`
+- `COPILOT_MODEL`
+- `COPILOT_BASE_URL`
+- `AUTOGEN_MODEL`
+- `AUTOGEN_BASE_URL`
+- `XPLANE_MCP_SSE_URL`
+
+3. Ensure X-Plane is running with the MCP plugin enabled and reachable at `XPLANE_MCP_SSE_URL`.
+
+4. Run one task:
+
+```bash
+atc-tower --task "Handle N123AB inbound to KSEA runway assignment and landing clearance."
+```
+
+5. Run interactive mode:
+
+```bash
+atc-tower --interactive
+```
+
+## Safety/Behavior Notes
+
+- Default behavior is no automatic radio transmission unless:
+  - `ATC_AUTO_TRANSMIT=true`, or
+  - the controller explicitly calls `transmit_radio(..., confirm=true)`.
+- This is a simulation assistant, not real-world ATC authority.
+
+## Troubleshooting
+
+- `ModuleNotFoundError: No module named 'copilot.models'`
+  - The SDK is session-based and does not provide `copilot.models`.
+  - Use this project version (which calls `CopilotClient.create_session`) and reinstall:
+
+```bash
+cd agentic-ais/atc
+source .venv/bin/activate
+pip install -e .
+```

@@ -1,0 +1,2 @@
+[console_scripts]
+atc-tower = atc_ai.main:cli_entrypoint

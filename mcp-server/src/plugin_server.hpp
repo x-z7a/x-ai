@@ -45,6 +45,8 @@ private:
     void process_pending_jobs();
     void clear_pending_jobs();
     mcp::json run_on_main_thread(std::function<mcp::json()> fn);
+    void refresh_aircraft_state_cache_main_thread();
+    mcp::json get_aircraft_state_cache() const;
 
     std::unique_ptr<mcp::server> server_;
     std::thread::id sim_thread_id_;
@@ -55,6 +57,11 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<bool> shutting_down_{false};
+
+    mutable std::mutex aircraft_state_mutex_;
+    mcp::json aircraft_state_cache_ = mcp::json::object();
+    bool aircraft_state_cache_ready_ = false;
+    float aircraft_state_update_elapsed_sec_ = 0.0f;
 
     struct LoadedObject {
         XPLMObjectRef ref = nullptr;

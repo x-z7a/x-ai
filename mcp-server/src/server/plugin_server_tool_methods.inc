@@ -7,6 +7,7 @@
 
     mcp::json tool_get_versions(const mcp::json& raw_params);
     mcp::json tool_get_runtime_info(const mcp::json& raw_params);
+    mcp::json tool_fetch_aircraft_state(const mcp::json& raw_params);
     mcp::json tool_get_system_paths(const mcp::json& raw_params);
     mcp::json tool_path_get_system(const mcp::json& raw_params);
     mcp::json tool_path_get_prefs(const mcp::json& raw_params);
