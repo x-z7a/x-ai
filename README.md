@@ -32,7 +32,9 @@ To enable integration with GitHub Copilot, add the following to your `.vscode/mc
 
 #### Prerequisites
 
-Install the `mcp-proxy` tool:
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+
+- Install the `mcp-proxy` tool:
 
 ```sh
 uv tool install mcp-proxy
