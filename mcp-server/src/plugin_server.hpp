@@ -22,7 +22,7 @@
 namespace xai_mcp {
 
 inline constexpr const char* kPluginName = "x-ai-mcp";
-inline constexpr const char* kPluginSignature = "com.x-ai.mcp.xplane";
+inline constexpr const char* kPluginSignature = "com.github.x-z7a/x-ai-mcp";
 inline constexpr const char* kPluginDescription = "X-Plane MCP bridge exposing XPLM SDK tools.";
 inline constexpr const char* kServerVersion = "0.1.0";
 
