@@ -215,15 +215,27 @@ void PluginMcpServer::register_dataref_tools() {
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_get(params); });
 
-    server_->register_tool(
-        mcp::tool_builder("xplm_dataref_set")
+    {
+        auto set_tool = mcp::tool_builder("xplm_dataref_set")
             .with_description(
                 "Write a DataRef. Provide `value` as number (scalar), array<number> (array), or hex string (bytes).")
             .with_string_param("name", "DataRef path.")
             .with_string_param("mode", "Optional scalar override: auto|int|float|double.", false)
             .with_number_param("offset", "Optional offset for array/bytes writes.", false)
-            .build(),
-        [this](const mcp::json& params, const std::string&) { return this->tool_dataref_set(params); });
+            .build();
+        set_tool.parameters_schema["properties"]["value"] = {
+            {"description", "Value to write: number for scalar datarefs, array of numbers for array datarefs, or hex string for byte datarefs."},
+            {"anyOf", mcp::json::array({
+                {{"type", "number"}},
+                {{"type", "array"}, {"items", {{"type", "number"}}}},
+                {{"type", "string"}}
+            })}
+        };
+        set_tool.parameters_schema["required"].push_back("value");
+        server_->register_tool(
+            std::move(set_tool),
+            [this](const mcp::json& params, const std::string&) { return this->tool_dataref_set(params); });
+    }
 }
 
 mcp::json PluginMcpServer::tool_dataref_info(const mcp::json& raw_params) {
