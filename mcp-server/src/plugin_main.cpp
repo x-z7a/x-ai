@@ -23,6 +23,9 @@ PLUGIN_API int XPluginStart(char* outName, char* outSignature, char* outDescript
     copy_plugin_string(outSignature, xai_mcp::kPluginSignature);
     copy_plugin_string(outDescription, xai_mcp::kPluginDescription);
 
+    XPLMEnableFeature("XPLM_USE_NATIVE_PATHS", 1);
+    
+
     if (!g_plugin_server.start()) {
         xai_mcp::log_line("XPluginStart failed.");
         return 0;
