@@ -59,7 +59,3 @@
     mcp::json tool_dataref_list(const mcp::json& raw_params);
     mcp::json tool_dataref_get(const mcp::json& raw_params);
     mcp::json tool_dataref_set(const mcp::json& raw_params);
-    mcp::json tool_dataref_get_array(const mcp::json& raw_params);
-    mcp::json tool_dataref_set_array(const mcp::json& raw_params);
-    mcp::json tool_dataref_get_bytes(const mcp::json& raw_params);
-    mcp::json tool_dataref_set_bytes(const mcp::json& raw_params);

@@ -7,6 +7,7 @@
 #include "XPLMDataAccess.h"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace xai_mcp {
@@ -17,31 +18,25 @@ enum class DataRefArrayMode {
     kFloat
 };
 
-DataRefArrayMode parse_dataref_array_mode(const mcp::json& params) {
-    const std::string mode = get_string_arg_or_default(params, "mode", "int");
-    if (mode == "int") {
-        return DataRefArrayMode::kInt;
-    }
-    if (mode == "float") {
-        return DataRefArrayMode::kFloat;
-    }
-    throw mcp::mcp_exception(mcp::error_code::invalid_params, "mode must be int or float.");
-}
-
-const char* array_mode_to_string(DataRefArrayMode mode) {
-    return mode == DataRefArrayMode::kInt ? "int" : "float";
-}
-
-enum class DataRefMode {
+enum class DataRefScalarMode {
     kAuto,
     kInt,
     kFloat,
     kDouble
 };
 
-DataRefMode parse_dataref_mode(const mcp::json& params) {
+bool supports_type(int type_bits, int type) {
+    return (type_bits & type) != 0;
+}
+
+bool has_numeric_scalar_type(int type_bits) {
+    return supports_type(type_bits, xplmType_Int) || supports_type(type_bits, xplmType_Float) ||
+           supports_type(type_bits, xplmType_Double);
+}
+
+DataRefScalarMode parse_dataref_scalar_mode(const mcp::json& params) {
     if (!params.contains("mode")) {
-        return DataRefMode::kAuto;
+        return DataRefScalarMode::kAuto;
     }
     if (!params["mode"].is_string()) {
         throw mcp::mcp_exception(mcp::error_code::invalid_params, "mode must be a string (auto|int|float|double).");
@@ -49,70 +44,147 @@ DataRefMode parse_dataref_mode(const mcp::json& params) {
 
     const std::string mode = params["mode"].get<std::string>();
     if (mode == "auto") {
-        return DataRefMode::kAuto;
+        return DataRefScalarMode::kAuto;
     }
     if (mode == "int") {
-        return DataRefMode::kInt;
+        return DataRefScalarMode::kInt;
     }
     if (mode == "float") {
-        return DataRefMode::kFloat;
+        return DataRefScalarMode::kFloat;
     }
     if (mode == "double") {
-        return DataRefMode::kDouble;
+        return DataRefScalarMode::kDouble;
     }
 
     throw mcp::mcp_exception(mcp::error_code::invalid_params, "Invalid mode. Expected auto|int|float|double.");
 }
 
-const char* mode_to_string(DataRefMode mode) {
+const char* scalar_mode_to_string(DataRefScalarMode mode) {
     switch (mode) {
-        case DataRefMode::kInt:
+        case DataRefScalarMode::kInt:
             return "int";
-        case DataRefMode::kFloat:
+        case DataRefScalarMode::kFloat:
             return "float";
-        case DataRefMode::kDouble:
+        case DataRefScalarMode::kDouble:
             return "double";
         default:
             return "auto";
     }
 }
 
-DataRefMode resolve_numeric_mode(DataRefMode requested, int type_bits) {
-    auto supports = [type_bits](int t) { return (type_bits & t) != 0; };
-    if (requested == DataRefMode::kAuto) {
-        if (supports(xplmType_Int)) {
-            return DataRefMode::kInt;
+const char* array_mode_to_string(DataRefArrayMode mode) {
+    return mode == DataRefArrayMode::kInt ? "int" : "float";
+}
+
+const char* array_value_type_to_string(DataRefArrayMode mode) {
+    return mode == DataRefArrayMode::kInt ? "int_array" : "float_array";
+}
+
+DataRefScalarMode resolve_scalar_mode_for_get(DataRefScalarMode requested, int type_bits) {
+    if (requested == DataRefScalarMode::kAuto) {
+        if (supports_type(type_bits, xplmType_Int)) {
+            return DataRefScalarMode::kInt;
         }
-        if (supports(xplmType_Float)) {
-            return DataRefMode::kFloat;
+        if (supports_type(type_bits, xplmType_Float)) {
+            return DataRefScalarMode::kFloat;
         }
-        if (supports(xplmType_Double)) {
-            return DataRefMode::kDouble;
+        if (supports_type(type_bits, xplmType_Double)) {
+            return DataRefScalarMode::kDouble;
         }
         throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef is not a numeric scalar type.");
     }
 
-    if (requested == DataRefMode::kInt && supports(xplmType_Int)) {
+    if (requested == DataRefScalarMode::kInt && supports_type(type_bits, xplmType_Int)) {
         return requested;
     }
-    if (requested == DataRefMode::kFloat && supports(xplmType_Float)) {
+    if (requested == DataRefScalarMode::kFloat && supports_type(type_bits, xplmType_Float)) {
         return requested;
     }
-    if (requested == DataRefMode::kDouble && supports(xplmType_Double)) {
+    if (requested == DataRefScalarMode::kDouble && supports_type(type_bits, xplmType_Double)) {
         return requested;
     }
 
     throw mcp::mcp_exception(mcp::error_code::invalid_params, "Requested mode is not supported by this DataRef.");
 }
 
-void ensure_array_mode_supported(DataRefArrayMode mode, int type_bits) {
-    if (mode == DataRefArrayMode::kInt && (type_bits & xplmType_IntArray) != 0) {
-        return;
+bool is_integral_number(double value) {
+    if (!std::isfinite(value)) {
+        return false;
     }
-    if (mode == DataRefArrayMode::kFloat && (type_bits & xplmType_FloatArray) != 0) {
-        return;
+    return std::fabs(value - std::round(value)) < 1e-9;
+}
+
+DataRefScalarMode resolve_scalar_mode_for_set(DataRefScalarMode requested, int type_bits, double input_value) {
+    if (requested != DataRefScalarMode::kAuto) {
+        return resolve_scalar_mode_for_get(requested, type_bits);
     }
-    throw mcp::mcp_exception(mcp::error_code::invalid_params, "Requested array mode not supported by DataRef.");
+
+    if (!has_numeric_scalar_type(type_bits)) {
+        throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef does not expose a numeric scalar value.");
+    }
+
+    if (is_integral_number(input_value) && supports_type(type_bits, xplmType_Int)) {
+        return DataRefScalarMode::kInt;
+    }
+    if (supports_type(type_bits, xplmType_Double)) {
+        return DataRefScalarMode::kDouble;
+    }
+    if (supports_type(type_bits, xplmType_Float)) {
+        return DataRefScalarMode::kFloat;
+    }
+    return DataRefScalarMode::kInt;
+}
+
+DataRefArrayMode resolve_array_mode_for_get(int type_bits) {
+    if (supports_type(type_bits, xplmType_IntArray)) {
+        return DataRefArrayMode::kInt;
+    }
+    if (supports_type(type_bits, xplmType_FloatArray)) {
+        return DataRefArrayMode::kFloat;
+    }
+    throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef is not an int/float array type.");
+}
+
+DataRefArrayMode resolve_array_mode_for_set(int type_bits, const mcp::json& values) {
+    const bool has_int_array = supports_type(type_bits, xplmType_IntArray);
+    const bool has_float_array = supports_type(type_bits, xplmType_FloatArray);
+
+    if (!has_int_array && !has_float_array) {
+        throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef does not expose an int/float array value.");
+    }
+    if (has_int_array && !has_float_array) {
+        return DataRefArrayMode::kInt;
+    }
+    if (!has_int_array && has_float_array) {
+        return DataRefArrayMode::kFloat;
+    }
+
+    bool all_integral = true;
+    for (const auto& item : values) {
+        if (!item.is_number()) {
+            throw mcp::mcp_exception(mcp::error_code::invalid_params, "all array values must be numeric.");
+        }
+        if (!is_integral_number(item.get<double>())) {
+            all_integral = false;
+        }
+    }
+    return all_integral ? DataRefArrayMode::kInt : DataRefArrayMode::kFloat;
+}
+
+mcp::json require_value_arg(const mcp::json& params) {
+    if (params.contains("value")) {
+        return params["value"];
+    }
+    // Backward-compatible aliases from the old split tools.
+    if (params.contains("values")) {
+        return params["values"];
+    }
+    if (params.contains("hex")) {
+        return params["hex"];
+    }
+    throw mcp::mcp_exception(
+        mcp::error_code::invalid_params,
+        "Missing argument: value (number | array<number> | hex string).");
 }
 
 }  // namespace
@@ -135,58 +207,23 @@ void PluginMcpServer::register_dataref_tools() {
 
     server_->register_tool(
         mcp::tool_builder("xplm_dataref_get")
-            .with_description("Read a scalar numeric DataRef.")
+            .with_description("Read a DataRef. The server auto-resolves scalar/array/bytes and returns a JSON value.")
             .with_string_param("name", "DataRef path.")
-            .with_string_param("mode", "auto|int|float|double", false)
+            .with_string_param("mode", "Optional scalar override: auto|int|float|double.", false)
+            .with_number_param("offset", "Optional offset for array/bytes reads.", false)
+            .with_number_param("max", "Optional maximum item/byte count for array/bytes reads.", false)
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_get(params); });
 
     server_->register_tool(
         mcp::tool_builder("xplm_dataref_set")
-            .with_description("Write a scalar numeric DataRef.")
+            .with_description(
+                "Write a DataRef. Provide `value` as number (scalar), array<number> (array), or hex string (bytes).")
             .with_string_param("name", "DataRef path.")
-            .with_number_param("value", "Numeric value to write.")
-            .with_string_param("mode", "auto|int|float|double", false)
+            .with_string_param("mode", "Optional scalar override: auto|int|float|double.", false)
+            .with_number_param("offset", "Optional offset for array/bytes writes.", false)
             .build(),
         [this](const mcp::json& params, const std::string&) { return this->tool_dataref_set(params); });
-
-    server_->register_tool(
-        mcp::tool_builder("xplm_dataref_get_array")
-            .with_description("Read int/float array DataRef.")
-            .with_string_param("name", "DataRef path.")
-            .with_string_param("mode", "int|float", false)
-            .with_number_param("offset", "Array offset.", false)
-            .with_number_param("max", "Maximum items to read.", false)
-            .build(),
-        [this](const mcp::json& params, const std::string&) { return this->tool_dataref_get_array(params); });
-
-    server_->register_tool(
-        mcp::tool_builder("xplm_dataref_set_array")
-            .with_description("Write int/float array DataRef.")
-            .with_string_param("name", "DataRef path.")
-            .with_string_param("mode", "int|float", false)
-            .with_number_param("offset", "Array offset.", false)
-            .with_array_param("values", "Values to write.", "number")
-            .build(),
-        [this](const mcp::json& params, const std::string&) { return this->tool_dataref_set_array(params); });
-
-    server_->register_tool(
-        mcp::tool_builder("xplm_dataref_get_bytes")
-            .with_description("Read byte data from a DataRef and return hex.")
-            .with_string_param("name", "DataRef path.")
-            .with_number_param("offset", "Byte offset.", false)
-            .with_number_param("max", "Maximum bytes to read.", false)
-            .build(),
-        [this](const mcp::json& params, const std::string&) { return this->tool_dataref_get_bytes(params); });
-
-    server_->register_tool(
-        mcp::tool_builder("xplm_dataref_set_bytes")
-            .with_description("Write byte data to a DataRef from hex string.")
-            .with_string_param("name", "DataRef path.")
-            .with_string_param("hex", "Byte payload as hex.")
-            .with_number_param("offset", "Byte offset.", false)
-            .build(),
-        [this](const mcp::json& params, const std::string&) { return this->tool_dataref_set_bytes(params); });
 }
 
 mcp::json PluginMcpServer::tool_dataref_info(const mcp::json& raw_params) {
@@ -268,175 +305,142 @@ mcp::json PluginMcpServer::tool_dataref_list(const mcp::json& raw_params) {
 mcp::json PluginMcpServer::tool_dataref_get(const mcp::json& raw_params) {
     const mcp::json params = normalize_params(raw_params);
     const std::string dataref_name = require_string_arg(params, "name");
-    const DataRefMode requested_mode = parse_dataref_mode(params);
-
-    return run_on_main_thread([dataref_name, requested_mode] {
-        const XPLMDataRef ref = XPLMFindDataRef(dataref_name.c_str());
-        if (!ref) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef not found: " + dataref_name);
-        }
-
-        const int type_bits = XPLMGetDataRefTypes(ref);
-        const DataRefMode resolved_mode = resolve_numeric_mode(requested_mode, type_bits);
-
-        mcp::json payload = {
-            {"name", dataref_name},
-            {"mode", mode_to_string(resolved_mode)},
-            {"type_bits", type_bits},
-            {"writable", XPLMCanWriteDataRef(ref) != 0}
-        };
-
-        switch (resolved_mode) {
-            case DataRefMode::kInt:
-                payload["value"] = XPLMGetDatai(ref);
-                break;
-            case DataRefMode::kFloat:
-                payload["value"] = XPLMGetDataf(ref);
-                break;
-            case DataRefMode::kDouble:
-                payload["value"] = XPLMGetDatad(ref);
-                break;
-            default:
-                throw mcp::mcp_exception(mcp::error_code::internal_error, "Unhandled DataRef mode.");
-        }
-
-        return text_content(payload);
-    });
-}
-
-mcp::json PluginMcpServer::tool_dataref_set(const mcp::json& raw_params) {
-    const mcp::json params = normalize_params(raw_params);
-    const std::string dataref_name = require_string_arg(params, "name");
-    const double input_value = require_number_arg(params, "value");
-    const DataRefMode requested_mode = parse_dataref_mode(params);
-
-    return run_on_main_thread([dataref_name, input_value, requested_mode] {
-        const XPLMDataRef ref = XPLMFindDataRef(dataref_name.c_str());
-        if (!ref) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef not found: " + dataref_name);
-        }
-        if (!XPLMCanWriteDataRef(ref)) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef is read-only: " + dataref_name);
-        }
-
-        const int type_bits = XPLMGetDataRefTypes(ref);
-        const DataRefMode resolved_mode = resolve_numeric_mode(requested_mode, type_bits);
-
-        switch (resolved_mode) {
-            case DataRefMode::kInt:
-                XPLMSetDatai(ref, static_cast<int>(std::llround(input_value)));
-                break;
-            case DataRefMode::kFloat:
-                XPLMSetDataf(ref, static_cast<float>(input_value));
-                break;
-            case DataRefMode::kDouble:
-                XPLMSetDatad(ref, input_value);
-                break;
-            default:
-                throw mcp::mcp_exception(mcp::error_code::internal_error, "Unhandled DataRef mode.");
-        }
-
-        mcp::json payload = {
-            {"name", dataref_name},
-            {"mode", mode_to_string(resolved_mode)},
-            {"type_bits", type_bits},
-            {"written_value", input_value}
-        };
-
-        switch (resolved_mode) {
-            case DataRefMode::kInt:
-                payload["current_value"] = XPLMGetDatai(ref);
-                break;
-            case DataRefMode::kFloat:
-                payload["current_value"] = XPLMGetDataf(ref);
-                break;
-            case DataRefMode::kDouble:
-                payload["current_value"] = XPLMGetDatad(ref);
-                break;
-            default:
-                break;
-        }
-
-        return text_content(payload);
-    });
-}
-
-mcp::json PluginMcpServer::tool_dataref_get_array(const mcp::json& raw_params) {
-    const mcp::json params = normalize_params(raw_params);
-    const std::string dataref_name = require_string_arg(params, "name");
-    const DataRefArrayMode mode = parse_dataref_array_mode(params);
+    const DataRefScalarMode requested_mode = parse_dataref_scalar_mode(params);
     const int offset = get_int_arg_or_default(params, "offset", 0);
     const int max_items = get_int_arg_or_default(params, "max", -1);
     if (offset < 0) {
         throw mcp::mcp_exception(mcp::error_code::invalid_params, "offset must be >= 0.");
     }
 
-    return run_on_main_thread([dataref_name, mode, offset, max_items] {
+    return run_on_main_thread([dataref_name, requested_mode, offset, max_items] {
         const XPLMDataRef ref = XPLMFindDataRef(dataref_name.c_str());
         if (!ref) {
             throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef not found: " + dataref_name);
         }
 
         const int type_bits = XPLMGetDataRefTypes(ref);
-        ensure_array_mode_supported(mode, type_bits);
 
-        if (mode == DataRefArrayMode::kInt) {
-            const int size = XPLMGetDatavi(ref, nullptr, 0, 0);
+        if (has_numeric_scalar_type(type_bits)) {
+            const DataRefScalarMode resolved_mode = resolve_scalar_mode_for_get(requested_mode, type_bits);
+
+            mcp::json payload = {
+                {"name", dataref_name},
+                {"kind", "scalar"},
+                {"value_type", scalar_mode_to_string(resolved_mode)},
+                {"type_bits", type_bits},
+                {"writable", XPLMCanWriteDataRef(ref) != 0}
+            };
+
+            switch (resolved_mode) {
+                case DataRefScalarMode::kInt:
+                    payload["value"] = XPLMGetDatai(ref);
+                    break;
+                case DataRefScalarMode::kFloat:
+                    payload["value"] = XPLMGetDataf(ref);
+                    break;
+                case DataRefScalarMode::kDouble:
+                    payload["value"] = XPLMGetDatad(ref);
+                    break;
+                default:
+                    throw mcp::mcp_exception(mcp::error_code::internal_error, "Unhandled scalar mode.");
+            }
+
+            return text_content(payload);
+        }
+
+        if (requested_mode != DataRefScalarMode::kAuto) {
+            throw mcp::mcp_exception(
+                mcp::error_code::invalid_params,
+                "mode can only be used with numeric scalar DataRefs.");
+        }
+
+        if (supports_type(type_bits, xplmType_IntArray) || supports_type(type_bits, xplmType_FloatArray)) {
+            const DataRefArrayMode mode = resolve_array_mode_for_get(type_bits);
+
+            if (mode == DataRefArrayMode::kInt) {
+                const int size = XPLMGetDatavi(ref, nullptr, 0, 0);
+                const int count = std::max(0, (max_items < 0) ? (size - offset) : max_items);
+                std::vector<int> values(static_cast<size_t>(count), 0);
+                const int read = XPLMGetDatavi(ref, values.data(), offset, count);
+                values.resize(static_cast<size_t>(std::max(0, read)));
+
+                mcp::json out = mcp::json::array();
+                for (const int value : values) {
+                    out.push_back(value);
+                }
+                return text_content({
+                    {"name", dataref_name},
+                    {"kind", "array"},
+                    {"value_type", array_value_type_to_string(mode)},
+                    {"mode", array_mode_to_string(mode)},
+                    {"type_bits", type_bits},
+                    {"size", size},
+                    {"offset", offset},
+                    {"read", read},
+                    {"value", out}
+                });
+            }
+
+            const int size = XPLMGetDatavf(ref, nullptr, 0, 0);
             const int count = std::max(0, (max_items < 0) ? (size - offset) : max_items);
-            std::vector<int> values(static_cast<size_t>(count), 0);
-            const int read = XPLMGetDatavi(ref, values.data(), offset, count);
+            std::vector<float> values(static_cast<size_t>(count), 0.0f);
+            const int read = XPLMGetDatavf(ref, values.data(), offset, count);
             values.resize(static_cast<size_t>(std::max(0, read)));
 
             mcp::json out = mcp::json::array();
-            for (const int value : values) {
+            for (const float value : values) {
                 out.push_back(value);
             }
             return text_content({
                 {"name", dataref_name},
+                {"kind", "array"},
+                {"value_type", array_value_type_to_string(mode)},
                 {"mode", array_mode_to_string(mode)},
                 {"type_bits", type_bits},
                 {"size", size},
                 {"offset", offset},
                 {"read", read},
-                {"values", out}
+                {"value", out}
             });
         }
 
-        const int size = XPLMGetDatavf(ref, nullptr, 0, 0);
-        const int count = std::max(0, (max_items < 0) ? (size - offset) : max_items);
-        std::vector<float> values(static_cast<size_t>(count), 0.0f);
-        const int read = XPLMGetDatavf(ref, values.data(), offset, count);
-        values.resize(static_cast<size_t>(std::max(0, read)));
+        if (supports_type(type_bits, xplmType_Data)) {
+            const int total = XPLMGetDatab(ref, nullptr, 0, 0);
+            const int to_read = std::max(0, (max_items < 0) ? (total - offset) : max_items);
+            std::vector<uint8_t> bytes(static_cast<size_t>(to_read), 0);
+            const int read = XPLMGetDatab(ref, bytes.data(), offset, to_read);
+            bytes.resize(static_cast<size_t>(std::max(0, read)));
 
-        mcp::json out = mcp::json::array();
-        for (const float value : values) {
-            out.push_back(value);
+            return text_content({
+                {"name", dataref_name},
+                {"kind", "bytes"},
+                {"value_type", "bytes"},
+                {"type_bits", type_bits},
+                {"offset", offset},
+                {"total", total},
+                {"read", read},
+                {"encoding", "hex"},
+                {"value", bytes_to_hex(bytes)}
+            });
         }
-        return text_content({
-            {"name", dataref_name},
-            {"mode", array_mode_to_string(mode)},
-            {"type_bits", type_bits},
-            {"size", size},
-            {"offset", offset},
-            {"read", read},
-            {"values", out}
-        });
+
+        throw mcp::mcp_exception(
+            mcp::error_code::invalid_params,
+            "DataRef does not expose a supported value type (scalar, int/float array, or bytes).");
     });
 }
 
-mcp::json PluginMcpServer::tool_dataref_set_array(const mcp::json& raw_params) {
+mcp::json PluginMcpServer::tool_dataref_set(const mcp::json& raw_params) {
     const mcp::json params = normalize_params(raw_params);
     const std::string dataref_name = require_string_arg(params, "name");
-    const DataRefArrayMode mode = parse_dataref_array_mode(params);
+    const DataRefScalarMode requested_mode = parse_dataref_scalar_mode(params);
     const int offset = get_int_arg_or_default(params, "offset", 0);
     if (offset < 0) {
         throw mcp::mcp_exception(mcp::error_code::invalid_params, "offset must be >= 0.");
     }
-    if (!params.contains("values") || !params["values"].is_array()) {
-        throw mcp::mcp_exception(mcp::error_code::invalid_params, "values must be an array.");
-    }
+    const mcp::json input_value = require_value_arg(params);
 
-    return run_on_main_thread([dataref_name, mode, offset, params] {
+    return run_on_main_thread([dataref_name, requested_mode, offset, input_value] {
         const XPLMDataRef ref = XPLMFindDataRef(dataref_name.c_str());
         if (!ref) {
             throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef not found: " + dataref_name);
@@ -446,128 +450,134 @@ mcp::json PluginMcpServer::tool_dataref_set_array(const mcp::json& raw_params) {
         }
 
         const int type_bits = XPLMGetDataRefTypes(ref);
-        ensure_array_mode_supported(mode, type_bits);
 
-        int size = 0;
-        int write_count = 0;
-        if (mode == DataRefArrayMode::kInt) {
-            size = XPLMGetDatavi(ref, nullptr, 0, 0);
-            std::vector<int> values;
-            values.reserve(params["values"].size());
-            for (const auto& item : params["values"]) {
-                if (!item.is_number()) {
-                    throw mcp::mcp_exception(mcp::error_code::invalid_params, "all values must be numeric.");
+        if (input_value.is_number()) {
+            const double numeric_input = input_value.get<double>();
+            const DataRefScalarMode resolved_mode =
+                resolve_scalar_mode_for_set(requested_mode, type_bits, numeric_input);
+
+            switch (resolved_mode) {
+                case DataRefScalarMode::kInt:
+                    XPLMSetDatai(ref, static_cast<int>(std::llround(numeric_input)));
+                    break;
+                case DataRefScalarMode::kFloat:
+                    XPLMSetDataf(ref, static_cast<float>(numeric_input));
+                    break;
+                case DataRefScalarMode::kDouble:
+                    XPLMSetDatad(ref, numeric_input);
+                    break;
+                default:
+                    throw mcp::mcp_exception(mcp::error_code::internal_error, "Unhandled scalar mode.");
+            }
+
+            mcp::json payload = {
+                {"name", dataref_name},
+                {"kind", "scalar"},
+                {"value_type", scalar_mode_to_string(resolved_mode)},
+                {"type_bits", type_bits},
+                {"written_value", numeric_input}
+            };
+
+            switch (resolved_mode) {
+                case DataRefScalarMode::kInt:
+                    payload["current_value"] = XPLMGetDatai(ref);
+                    break;
+                case DataRefScalarMode::kFloat:
+                    payload["current_value"] = XPLMGetDataf(ref);
+                    break;
+                case DataRefScalarMode::kDouble:
+                    payload["current_value"] = XPLMGetDatad(ref);
+                    break;
+                default:
+                    break;
+            }
+
+            return text_content(payload);
+        }
+
+        if (requested_mode != DataRefScalarMode::kAuto) {
+            throw mcp::mcp_exception(
+                mcp::error_code::invalid_params,
+                "mode can only be used when writing a numeric scalar value.");
+        }
+
+        if (input_value.is_array()) {
+            const DataRefArrayMode mode = resolve_array_mode_for_set(type_bits, input_value);
+
+            int size = 0;
+            int write_count = 0;
+            if (mode == DataRefArrayMode::kInt) {
+                size = XPLMGetDatavi(ref, nullptr, 0, 0);
+                std::vector<int> values;
+                values.reserve(input_value.size());
+                for (const auto& item : input_value) {
+                    if (!item.is_number()) {
+                        throw mcp::mcp_exception(mcp::error_code::invalid_params, "all array values must be numeric.");
+                    }
+                    values.push_back(static_cast<int>(std::llround(item.get<double>())));
                 }
-                values.push_back(static_cast<int>(std::llround(item.get<double>())));
-            }
-            write_count = static_cast<int>(values.size());
-            if (!values.empty()) {
-                XPLMSetDatavi(ref, values.data(), offset, write_count);
-            }
-        } else {
-            size = XPLMGetDatavf(ref, nullptr, 0, 0);
-            std::vector<float> values;
-            values.reserve(params["values"].size());
-            for (const auto& item : params["values"]) {
-                if (!item.is_number()) {
-                    throw mcp::mcp_exception(mcp::error_code::invalid_params, "all values must be numeric.");
+                write_count = static_cast<int>(values.size());
+                if (!values.empty()) {
+                    XPLMSetDatavi(ref, values.data(), offset, write_count);
                 }
-                values.push_back(static_cast<float>(item.get<double>()));
+            } else {
+                size = XPLMGetDatavf(ref, nullptr, 0, 0);
+                std::vector<float> values;
+                values.reserve(input_value.size());
+                for (const auto& item : input_value) {
+                    if (!item.is_number()) {
+                        throw mcp::mcp_exception(mcp::error_code::invalid_params, "all array values must be numeric.");
+                    }
+                    values.push_back(static_cast<float>(item.get<double>()));
+                }
+                write_count = static_cast<int>(values.size());
+                if (!values.empty()) {
+                    XPLMSetDatavf(ref, values.data(), offset, write_count);
+                }
             }
-            write_count = static_cast<int>(values.size());
-            if (!values.empty()) {
-                XPLMSetDatavf(ref, values.data(), offset, write_count);
+
+            return text_content({
+                {"name", dataref_name},
+                {"kind", "array"},
+                {"value_type", array_value_type_to_string(mode)},
+                {"mode", array_mode_to_string(mode)},
+                {"type_bits", type_bits},
+                {"size", size},
+                {"offset", offset},
+                {"write_count", write_count}
+            });
+        }
+
+        if (input_value.is_string()) {
+            if (!supports_type(type_bits, xplmType_Data)) {
+                throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef does not expose byte data.");
             }
+            const std::vector<uint8_t> bytes = hex_to_bytes(input_value.get<std::string>());
+
+            if (!bytes.empty()) {
+                XPLMSetDatab(ref, const_cast<uint8_t*>(bytes.data()), offset, static_cast<int>(bytes.size()));
+            }
+
+            std::vector<uint8_t> confirm(bytes.size(), 0);
+            const int read = bytes.empty() ? 0 : XPLMGetDatab(ref, confirm.data(), offset, static_cast<int>(confirm.size()));
+            confirm.resize(static_cast<size_t>(std::max(0, read)));
+
+            return text_content({
+                {"name", dataref_name},
+                {"kind", "bytes"},
+                {"value_type", "bytes"},
+                {"type_bits", type_bits},
+                {"offset", offset},
+                {"written", static_cast<int>(bytes.size())},
+                {"confirm_read", read},
+                {"encoding", "hex"},
+                {"current_value", bytes_to_hex(confirm)}
+            });
         }
 
-        return text_content({
-            {"name", dataref_name},
-            {"mode", array_mode_to_string(mode)},
-            {"type_bits", type_bits},
-            {"size", size},
-            {"offset", offset},
-            {"write_count", write_count}
-        });
-    });
-}
-
-mcp::json PluginMcpServer::tool_dataref_get_bytes(const mcp::json& raw_params) {
-    const mcp::json params = normalize_params(raw_params);
-    const std::string dataref_name = require_string_arg(params, "name");
-    const int offset = get_int_arg_or_default(params, "offset", 0);
-    const int max_bytes = get_int_arg_or_default(params, "max", -1);
-    if (offset < 0) {
-        throw mcp::mcp_exception(mcp::error_code::invalid_params, "offset must be >= 0.");
-    }
-
-    return run_on_main_thread([dataref_name, offset, max_bytes] {
-        const XPLMDataRef ref = XPLMFindDataRef(dataref_name.c_str());
-        if (!ref) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef not found: " + dataref_name);
-        }
-
-        const int type_bits = XPLMGetDataRefTypes(ref);
-        if ((type_bits & xplmType_Data) == 0) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef does not expose byte data.");
-        }
-
-        const int total = XPLMGetDatab(ref, nullptr, 0, 0);
-        const int to_read = std::max(0, (max_bytes < 0) ? (total - offset) : max_bytes);
-        std::vector<uint8_t> bytes(static_cast<size_t>(to_read), 0);
-        const int read = XPLMGetDatab(ref, bytes.data(), offset, to_read);
-        bytes.resize(static_cast<size_t>(std::max(0, read)));
-
-        return text_content({
-            {"name", dataref_name},
-            {"type_bits", type_bits},
-            {"offset", offset},
-            {"total", total},
-            {"read", read},
-            {"hex", bytes_to_hex(bytes)}
-        });
-    });
-}
-
-mcp::json PluginMcpServer::tool_dataref_set_bytes(const mcp::json& raw_params) {
-    const mcp::json params = normalize_params(raw_params);
-    const std::string dataref_name = require_string_arg(params, "name");
-    const std::string hex = require_string_arg(params, "hex");
-    const int offset = get_int_arg_or_default(params, "offset", 0);
-    if (offset < 0) {
-        throw mcp::mcp_exception(mcp::error_code::invalid_params, "offset must be >= 0.");
-    }
-    const std::vector<uint8_t> bytes = hex_to_bytes(hex);
-
-    return run_on_main_thread([dataref_name, offset, bytes] {
-        const XPLMDataRef ref = XPLMFindDataRef(dataref_name.c_str());
-        if (!ref) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef not found: " + dataref_name);
-        }
-        if (!XPLMCanWriteDataRef(ref)) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef is read-only: " + dataref_name);
-        }
-
-        const int type_bits = XPLMGetDataRefTypes(ref);
-        if ((type_bits & xplmType_Data) == 0) {
-            throw mcp::mcp_exception(mcp::error_code::invalid_params, "DataRef does not expose byte data.");
-        }
-
-        if (!bytes.empty()) {
-            XPLMSetDatab(ref, const_cast<uint8_t*>(bytes.data()), offset, static_cast<int>(bytes.size()));
-        }
-
-        std::vector<uint8_t> confirm(bytes.size(), 0);
-        const int read = bytes.empty() ? 0 : XPLMGetDatab(ref, confirm.data(), offset, static_cast<int>(confirm.size()));
-        confirm.resize(static_cast<size_t>(std::max(0, read)));
-
-        return text_content({
-            {"name", dataref_name},
-            {"type_bits", type_bits},
-            {"offset", offset},
-            {"written", static_cast<int>(bytes.size())},
-            {"confirm_read", read},
-            {"confirm_hex", bytes_to_hex(confirm)}
-        });
+        throw mcp::mcp_exception(
+            mcp::error_code::invalid_params,
+            "value must be number (scalar), array<number> (array), or hex string (bytes).");
     });
 }
 
