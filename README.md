@@ -55,7 +55,7 @@ Add the following configuration to your Claude Desktop settings:
 {
 	"mcpServers": {
 		"xplane": {
-			"command": "/Users/dzou/.local/bin/mcp-proxy",
+			"command": "mcp-proxy",
 			"args": [
 				"http://127.0.0.1:8765/sse"
 			]
