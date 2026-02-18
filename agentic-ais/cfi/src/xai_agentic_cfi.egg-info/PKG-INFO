@@ -1,0 +1,76 @@
+Metadata-Version: 2.4
+Name: xai-agentic-cfi
+Version: 0.1.0
+Summary: Autonomous CFI monitor for X-Plane MCP using deterministic checks + AutoGen coaching.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: autogen-agentchat<0.8.0,>=0.7.5
+Requires-Dist: autogen-ext[openai]<0.8.0,>=0.7.5
+Requires-Dist: github-copilot-sdk<0.2.0,>=0.1.1
+Requires-Dist: mcp<2.0.0,>=1.13.1
+Requires-Dist: pydantic<3.0.0,>=2.11.0
+Requires-Dist: python-dotenv<2.0.0,>=1.1.0
+
+# Autonomous CFI (AutoGen + X-Plane MCP)
+
+This project is a standalone autonomous CFI monitor that:
+
+1. Monitors the full flight continuously through X-Plane MCP.
+2. Uses deterministic checkride/safety rules (Private ASEL defaults).
+3. Uses AutoGen-backed text generation for concise spoken coaching/debrief.
+4. Speaks alerts and end-of-flight debrief through `xplm_speak_string`.
+5. Runs with no task prompt, no REPL, and no user input.
+
+## Layout
+
+- `src/cfi_ai/main.py`: CLI entrypoint (`cfi-monitor`).
+- `src/cfi_ai/runtime.py`: async orchestration workers.
+- `src/cfi_ai/rules.py`: deterministic phase/rule/shutdown logic.
+- `src/cfi_ai/coach.py`: AutoGen alert/debrief composition + fallbacks.
+- `src/cfi_ai/cfi_tools.py`: MCP tool wrappers used by CFI runtime.
+- `src/cfi_ai/xplane_mcp.py`: SSE MCP client.
+- `tests/`: rule/runtime behavior tests.
+
+## Quick Start
+
+1. Install:
+
+```bash
+cd /Volumes/storage/git/x-ai/agentic-ais/cfi
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+2. Configure environment:
+
+```bash
+cp .env.example .env
+# edit values
+```
+
+3. Ensure X-Plane + MCP plugin are running.
+
+4. Run autonomous monitor:
+
+```bash
+cfi-monitor
+```
+
+Optional flags:
+
+```bash
+cfi-monitor --poll-sec 0.8 --max-flight-hours 4
+cfi-monitor --no-speak
+```
+
+## Defaults
+
+- Checkride profile: Private ASEL style monitoring.
+- Alert policy: coach everything (`P0`/`P1`/`P2` spoken).
+- Monitoring scope: core flight phases + maneuver heuristics.
+- End condition: had airborne, then on ground/stationary with engines off for hold duration.
+
+## Safety Note
+
+Simulation-only coaching aid. Not a substitute for a certificated instructor or real-world operational authority.

@@ -1,0 +1,38 @@
+{
+  "defaults": [
+    "Prioritize safety-critical callouts before performance coaching.",
+    "Use POH/AFM values for this aircraft when known; if unknown, avoid inventing exact speeds.",
+    "For checkride coaching, be explicit about stabilized approach and go-around decision criteria."
+  ],
+  "profiles": {
+    "C172": {
+      "icao": ["C172", "C172S"],
+      "name_contains": ["cessna 172", "skyhawk"],
+      "notes": [
+        "Typically treated as single-engine piston trainer.",
+        "Favor conservative coaching around float and pitch oscillation on landing."
+      ],
+      "checkride_focus": [
+        "airspeed discipline in climb and approach",
+        "coordinated turns and rudder use",
+        "stable flare and touchdown control"
+      ]
+    },
+    "PA28": {
+      "icao": ["P28A"],
+      "name_contains": ["piper arrow", "pa-28"],
+      "notes": [
+        "Include gear-configuration awareness in approach and landing coaching.",
+        "Call out prop/rpm and power management consistency when relevant."
+      ]
+    },
+    "BE58": {
+      "icao": ["BE58"],
+      "name_contains": ["baron"],
+      "notes": [
+        "Multi-engine profile: include asymmetric-thrust awareness in safety coaching.",
+        "Monitor directional control closely during low-speed high-power phases."
+      ]
+    }
+  }
+}
