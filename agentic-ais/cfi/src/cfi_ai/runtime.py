@@ -5,7 +5,7 @@ import json
 import re
 import time
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -169,6 +169,7 @@ class CfiRuntime:
         self._shutdown_candidate_since: float | None = None
         self._shutdown_debrief_emitted = False
         self._flight_index = 1
+        self._hazard_phrase_refresh_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         await self._start_with_retry(
@@ -181,8 +182,14 @@ class CfiRuntime:
         )
         await self._team.start()
         await self._bootstrap_session_profile()
+        self._start_hazard_phrase_refresh_loop()
 
     async def stop(self) -> None:
+        if self._hazard_phrase_refresh_task is not None:
+            self._hazard_phrase_refresh_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._hazard_phrase_refresh_task
+        self._hazard_phrase_refresh_task = None
         await self._team.stop()
         await self._udp.stop()
         await self._speech.stop()
@@ -471,6 +478,70 @@ class CfiRuntime:
             )
             if spoke:
                 print(f"[WELCOME] {self._session_profile.welcome_message.strip()}")
+
+    def _start_hazard_phrase_refresh_loop(self) -> None:
+        if not self._config.hazard_phrase_runtime_enabled:
+            return
+        refresher = getattr(self._team, "refresh_hazard_phrase_variants", None)
+        if not callable(refresher):
+            return
+        if self._hazard_phrase_refresh_task is not None and not self._hazard_phrase_refresh_task.done():
+            return
+        self._hazard_phrase_refresh_task = asyncio.create_task(self._hazard_phrase_refresh_loop())
+
+    async def _hazard_phrase_refresh_loop(self) -> None:
+        refresh_sec = max(0.1, self._config.hazard_phrase_refresh_sec)
+        while True:
+            try:
+                await asyncio.sleep(refresh_sec)
+            except asyncio.CancelledError:
+                raise
+
+            if self._session_profile is None:
+                continue
+            refresher = getattr(self._team, "refresh_hazard_phrase_variants", None)
+            if not callable(refresher):
+                continue
+
+            try:
+                variants = await refresher(
+                    session_profile=self._session_profile,
+                    recent_alert_counts=dict(self._hazard_alert_counts),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._runtime_log.write(
+                    {
+                        "ts": time.time(),
+                        "event": "hazard_phrase_refresh_failed",
+                        "error": str(exc),
+                    }
+                )
+                continue
+
+            if not variants:
+                continue
+
+            self._hazard_monitor.update_speech_variants(variants)
+            self._session_profile = replace(
+                self._session_profile,
+                hazard_profile=replace(
+                    self._session_profile.hazard_profile,
+                    speech_variants=_merge_speech_variants(
+                        self._session_profile.hazard_profile.speech_variants,
+                        variants,
+                    ),
+                ),
+            )
+            self._runtime_log.write(
+                {
+                    "ts": time.time(),
+                    "event": "hazard_phrase_refresh_applied",
+                    "rule_count": len(variants),
+                    "rules": sorted(variants.keys()),
+                }
+            )
 
     async def _run_shutdown_debrief(self, reason: str) -> None:
         if self._shutdown_debrief_emitted:
@@ -767,3 +838,16 @@ def _truncate_text_boundary(text: str, max_chars: int) -> str:
     else:
         head = text[:max_chars]
     return head.rstrip(" ,;:-")
+
+
+def _merge_speech_variants(
+    current: dict[str, list[str]],
+    updates: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    merged = {
+        rule: list(lines)
+        for rule, lines in current.items()
+    }
+    for rule, lines in updates.items():
+        merged[rule] = list(lines)
+    return merged

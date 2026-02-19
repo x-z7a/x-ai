@@ -72,6 +72,7 @@ class TestAgentTeamHelpers(unittest.TestCase):
             '"welcome_message":"Welcome, we are training as SR22 today.",'
             '"hazard_profile":{"enabled_rules":["stall_or_low_speed","excessive_taxi_speed"],'
             '"thresholds":{"low_airspeed_kt":62,"max_taxi_speed_kt":20},'
+            '"speech_variants":{"excessive_taxi_speed":["Taxi slower now.","Reduce taxi pace."]},'
             '"notes":["SR22 stricter taxi profile"]}}'
         )
         profile = CfiAgentTeam.parse_startup_profile(raw)
@@ -80,6 +81,7 @@ class TestAgentTeamHelpers(unittest.TestCase):
         self.assertIn("ground segment", profile.assumptions[0].lower())
         self.assertIn("excessive_taxi_speed", profile.hazard_profile.enabled_rules)
         self.assertEqual(profile.hazard_profile.thresholds["max_taxi_speed_kt"], 20.0)
+        self.assertGreaterEqual(len(profile.hazard_profile.speech_variants["excessive_taxi_speed"]), 2)
 
     def test_parse_startup_profile_fallback(self) -> None:
         profile = CfiAgentTeam.parse_startup_profile("not-json")

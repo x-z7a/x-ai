@@ -60,6 +60,8 @@ class CfiConfig:
     nonurgent_cooldown_sec: float
     nonurgent_suppress_after_urgent_sec: float
     shutdown_detect_dwell_sec: float
+    hazard_phrase_refresh_sec: float
+    hazard_phrase_runtime_enabled: bool
 
     memory_backend: str
     telemetry_enabled: bool
@@ -127,6 +129,8 @@ class CfiConfig:
             nonurgent_cooldown_sec=_float_env("CFI_NONURGENT_COOLDOWN_SEC", 45.0),
             nonurgent_suppress_after_urgent_sec=_float_env("CFI_NONURGENT_SUPPRESS_AFTER_URGENT_SEC", 12.0),
             shutdown_detect_dwell_sec=_float_env("CFI_SHUTDOWN_DETECT_DWELL_SEC", 8.0),
+            hazard_phrase_refresh_sec=_float_env("CFI_HAZARD_PHRASE_REFRESH_SEC", 90.0),
+            hazard_phrase_runtime_enabled=_bool_env("CFI_HAZARD_PHRASE_RUNTIME_ENABLED", default=True),
             memory_backend=os.getenv("CFI_MEMORY_BACKEND", "none").strip().lower(),
             telemetry_enabled=_bool_env("CFI_TELEMETRY_ENABLED", default=False),
             team_chat_log_path=team_chat_log_path,
@@ -157,6 +161,8 @@ class CfiConfig:
             raise ValueError("CFI_REVIEW_WINDOW_SEC and CFI_REVIEW_TICK_SEC must be > 0.")
         if self.shutdown_detect_dwell_sec <= 0:
             raise ValueError("CFI_SHUTDOWN_DETECT_DWELL_SEC must be > 0.")
+        if self.hazard_phrase_refresh_sec <= 0:
+            raise ValueError("CFI_HAZARD_PHRASE_REFRESH_SEC must be > 0.")
         if self.memory_backend not in {"none", "list"}:
             raise ValueError("CFI_MEMORY_BACKEND must be one of: none, list")
         if self.copilot_use_custom_provider:

@@ -147,6 +147,26 @@ class _PriorityReviewTeam(_FakeTeam):
         )
 
 
+class _RefreshingTeam(_FakeTeam):
+    def __init__(self) -> None:
+        super().__init__(speak_now=False)
+        self.refresh_calls = 0
+
+    async def refresh_hazard_phrase_variants(
+        self,
+        *,
+        session_profile: SessionProfile,
+        recent_alert_counts: dict[str, int],
+    ) -> dict[str, list[str]]:
+        del session_profile, recent_alert_counts
+        self.refresh_calls += 1
+        return {
+            "stall_or_low_speed": [
+                "Custom runtime phrase: lower nose and add power now.",
+            ]
+        }
+
+
 def _config(tmpdir: str) -> CfiConfig:
     return CfiConfig(
         xplane_udp_host="127.0.0.1",
@@ -174,6 +194,8 @@ def _config(tmpdir: str) -> CfiConfig:
         nonurgent_cooldown_sec=0.1,
         nonurgent_suppress_after_urgent_sec=5.0,
         shutdown_detect_dwell_sec=0.2,
+        hazard_phrase_refresh_sec=30.0,
+        hazard_phrase_runtime_enabled=True,
         memory_backend="none",
         telemetry_enabled=False,
         team_chat_log_path=str(Path(tmpdir) / "team.chat.log.jsonl"),
@@ -259,6 +281,62 @@ class TestRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             await runtime.run(duration_sec=0.25)
 
             self.assertGreaterEqual(len(speech.nonurgent_calls), 1)
+
+    async def test_runtime_hazard_phrase_refresh_applies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _config(tmpdir)
+            cfg = CfiConfig(
+                **{
+                    **cfg.__dict__,
+                    "hazard_phrase_refresh_sec": 0.1,
+                    "review_tick_sec": 0.5,
+                }
+            )
+            base = time.time()
+            snapshots = [
+                FlightSnapshot(
+                    timestamp_sec=base + 1.0,
+                    on_ground=False,
+                    indicated_airspeed_kt=45.0,
+                    vertical_speed_fpm=0.0,
+                ),
+                FlightSnapshot(
+                    timestamp_sec=base + 2.0,
+                    on_ground=False,
+                    indicated_airspeed_kt=44.0,
+                    vertical_speed_fpm=0.0,
+                ),
+                FlightSnapshot(
+                    timestamp_sec=base + 3.0,
+                    on_ground=False,
+                    indicated_airspeed_kt=43.0,
+                    vertical_speed_fpm=0.0,
+                ),
+                FlightSnapshot(
+                    timestamp_sec=base + 4.0,
+                    on_ground=False,
+                    indicated_airspeed_kt=42.0,
+                    vertical_speed_fpm=0.0,
+                ),
+            ]
+            udp = _StreamingUdp(snapshots)
+            speech = _FakeSpeech()
+            team = _RefreshingTeam()
+
+            runtime = CfiRuntime(
+                cfg,
+                udp_source=udp,
+                speech_sink=speech,
+                team_runner=team,
+            )
+            await runtime.run(duration_sec=0.7)
+
+            self.assertGreaterEqual(team.refresh_calls, 1)
+            urgent_texts = [text for _key, text in speech.urgent_calls]
+            self.assertTrue(
+                any("Custom runtime phrase" in text for text in urgent_texts),
+                msg=f"urgent calls: {urgent_texts}",
+            )
 
     async def test_startup_retries_speech(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

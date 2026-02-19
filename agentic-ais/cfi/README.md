@@ -62,6 +62,7 @@ Detailed telemetry is implemented but disabled by default (`CFI_TELEMETRY_ENABLE
 
 - On startup, CFI waits briefly for initial UDP telemetry, asks an LLM to infer session aircraft parameters (including ICAO), and stores that profile for later coaching decisions.
 - Startup LLM output also includes a plane-specific hazard profile (enabled rules + thresholds), which is applied immediately to deterministic hazard monitoring.
+- Startup LLM output can include per-hazard speech variants so urgent callouts are less repetitive.
 - The same startup LLM pass generates a welcome message that can be spoken through MCP.
 - If bootstrap parsing fails, CFI falls back to a default `C172` profile and continues.
 
@@ -73,6 +74,18 @@ Detailed telemetry is implemented but disabled by default (`CFI_TELEMETRY_ENABLE
 - If shutdown is never detected, runtime still runs one final debrief on process exit as fallback.
 - If debrief speech is available and not suppressed by a recent urgent alert, CFI can speak final feedback.
 - `CFI_SHUTDOWN_DETECT_DWELL_SEC` tunes how long shutdown conditions must hold before triggering debrief.
+
+## Hazard Speech Variants
+
+- A runtime background agent can refresh hazard phrase variants without blocking urgent monitoring.
+- Urgent alerts always remain deterministic; phrase generation is asynchronous and cached.
+- `CFI_HAZARD_PHRASE_RUNTIME_ENABLED` toggles runtime refresh.
+- `CFI_HAZARD_PHRASE_REFRESH_SEC` sets refresh cadence.
+
+## Taxi Speed False-Positive Suppression
+
+- Taxi speed monitoring is suppressed during takeoff ground roll acceleration.
+- Taxi-in warnings are suppressed during high-speed landing rollout until speed decays into true taxi regime.
 
 ## Retry Behavior
 

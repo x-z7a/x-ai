@@ -114,6 +114,45 @@ class HazardProfile:
             "unstable_approach_max_ias_kt": 95.0,
             "unstable_approach_min_sink_fpm": -1000.0,
             "unstable_approach_max_agl_ft": 1000.0,
+            "taxi_takeoff_roll_throttle_ratio": 0.65,
+            "taxi_takeoff_roll_ias_kt": 35.0,
+            "taxi_takeoff_roll_gs_kt": 30.0,
+            "taxi_in_rollout_clear_gs_kt": 25.0,
+            "taxi_in_rollout_clear_ias_kt": 30.0,
+        }
+    )
+    speech_variants: dict[str, list[str]] = field(
+        default_factory=lambda: {
+            "stall_or_low_speed": [
+                "Airspeed critical. Lower the nose and add power now.",
+                "Watch your energy. Reduce pitch and add power immediately.",
+                "Low airspeed. Recover now with pitch and power.",
+            ],
+            "excessive_sink_low_alt": [
+                "Sink rate. Reduce descent and stabilize immediately.",
+                "High sink near the ground. Add power and arrest descent.",
+                "Descent is too high. Stabilize vertical speed now.",
+            ],
+            "high_bank_low_alt": [
+                "Bank angle. Roll wings level and stabilize the approach.",
+                "Steep bank low altitude. Level the wings now.",
+                "Too much bank close to ground. Reduce bank and stabilize.",
+            ],
+            "pull_up_now": [
+                "Pull up. Arrest descent now.",
+                "Terrain risk. Pull up and recover immediately.",
+                "Descent unsafe near ground. Pitch up now.",
+            ],
+            "excessive_taxi_speed": [
+                "Slow down taxi speed now and regain full directional control.",
+                "Taxi too fast. Reduce speed and maintain centerline.",
+                "Ease off speed on taxi. Keep control and spacing.",
+            ],
+            "unstable_approach_fast_or_sink": [
+                "Unstable approach. Correct now or execute a go-around.",
+                "Approach not stabilized. Fix speed and sink or go around.",
+                "Profile unstable. Stabilize immediately or go around.",
+            ],
         }
     )
     notes: list[str] = field(default_factory=list)

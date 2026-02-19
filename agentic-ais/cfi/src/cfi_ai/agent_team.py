@@ -55,6 +55,10 @@ Output strict JSON only:
       "low_airspeed_kt": 50,
       "max_taxi_speed_kt": 30
     },
+    "speech_variants": {
+      "stall_or_low_speed": ["...", "..."],
+      "excessive_taxi_speed": ["...", "..."]
+    },
     "notes": ["..."]
   }
 }
@@ -64,10 +68,34 @@ Rules:
 - If uncertain, default to C172 and say so in assumptions.
 - welcome_message must be concise and student-friendly.
 - Tune hazard_profile thresholds for the inferred aircraft type.
+- Provide 2-4 concise spoken variants per enabled hazard rule.
+- Each speech variant must be short, imperative, and suitable for urgent cockpit callouts.
 - Only include known rule IDs:
   stall_or_low_speed, excessive_sink_low_alt, high_bank_low_alt, pull_up_now,
   excessive_taxi_speed, unstable_approach_fast_or_sink.
 - Focus on primary VFR GA training context.
+"""
+
+HAZARD_PHRASE_REFRESH_SYSTEM_PROMPT = """
+You are a CFI hazard phrase variation assistant.
+Generate short, cockpit-safe spoken variants for urgent hazard callouts.
+
+Output strict JSON only:
+{
+  "speech_variants": {
+    "stall_or_low_speed": ["...", "..."],
+    "excessive_sink_low_alt": ["...", "..."]
+  }
+}
+
+Rules:
+- Only use these rule IDs:
+  stall_or_low_speed, excessive_sink_low_alt, high_bank_low_alt, pull_up_now,
+  excessive_taxi_speed, unstable_approach_fast_or_sink.
+- Each listed rule must have 2-4 variants.
+- Each variant must be imperative, concise, and <= 16 words.
+- Avoid repetitive wording across variants for the same rule.
+- Use plain aviation training language, no slang.
 """
 
 
@@ -170,6 +198,48 @@ class CfiAgentTeam:
                 hazard_profile=default_profile,
                 raw_llm_output=str(exc),
             )
+
+    async def refresh_hazard_phrase_variants(
+        self,
+        *,
+        session_profile: SessionProfile,
+        recent_alert_counts: dict[str, int],
+    ) -> dict[str, list[str]]:
+        if self._model_client is None:
+            raise RuntimeError("CfiAgentTeam is not started.")
+
+        refiner = AssistantAgent(
+            name="hazard_phrase_refiner",
+            model_client=self._model_client,
+            description="Generate diverse hazard callout variants for runtime speech.",
+            system_message=HAZARD_PHRASE_REFRESH_SYSTEM_PROMPT.strip(),
+        )
+        task_payload = {
+            "aircraft_icao": session_profile.aircraft_icao,
+            "aircraft_category": session_profile.aircraft_category,
+            "enabled_rules": list(session_profile.hazard_profile.enabled_rules),
+            "current_speech_variants": session_profile.hazard_profile.speech_variants,
+            "recent_alert_counts": recent_alert_counts,
+        }
+        result = await refiner.run(task=json.dumps(task_payload, ensure_ascii=True))
+        raw = self._extract_last_output_text(result.messages)
+        parsed = _extract_json_object(raw)
+        if not isinstance(parsed, dict):
+            return {}
+        speech_raw = parsed.get("speech_variants")
+        if not isinstance(speech_raw, dict):
+            return {}
+
+        allowed_rules = set(HazardProfile().enabled_rules)
+        out: dict[str, list[str]] = {}
+        for key, value in speech_raw.items():
+            rule = str(key).strip()
+            if rule not in allowed_rules or not isinstance(value, list):
+                continue
+            cleaned = _parse_speech_variants(value)
+            if cleaned:
+                out[rule] = cleaned
+        return out
 
     @staticmethod
     def choose_candidates(
@@ -588,9 +658,24 @@ def _parse_hazard_profile(
         if parsed_notes:
             notes = parsed_notes[:8]
 
+    speech_variants = {
+        rule: list(lines)
+        for rule, lines in default_profile.speech_variants.items()
+    }
+    speech_raw = raw_hazard.get("speech_variants", {})
+    if isinstance(speech_raw, dict):
+        for key, value in speech_raw.items():
+            rule = str(key).strip()
+            if rule not in allowed_rules or not isinstance(value, list):
+                continue
+            cleaned = _parse_speech_variants(value)
+            if cleaned:
+                speech_variants[rule] = cleaned
+
     return HazardProfile(
         enabled_rules=enabled_rules,
         thresholds=thresholds,
+        speech_variants=speech_variants,
         notes=notes,
     )
 
@@ -714,6 +799,24 @@ def _truncate_text(text: str, max_chars: int) -> str:
 
 def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+def _parse_speech_variants(raw_items: list[Any]) -> list[str]:
+    out: list[str] = []
+    for item in raw_items:
+        text = str(item).strip()
+        if not text:
+            continue
+        text = " ".join(text.split())
+        text = _truncate_text(text, max_chars=140)
+        if not text:
+            continue
+        if text[-1] not in ".!?":
+            text = f"{text}."
+        out.append(text)
+        if len(out) >= 6:
+            break
+    return out
 
 
 _RISK_KEYWORDS: tuple[str, ...] = (
