@@ -1,0 +1,2 @@
+[console_scripts]
+cfi-coach = cfi_ai.main:cli_entrypoint

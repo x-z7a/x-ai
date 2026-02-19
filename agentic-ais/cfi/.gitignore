@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+team.chat.log.jsonl
+runtime.events.log.jsonl
+telemetry.log.jsonl

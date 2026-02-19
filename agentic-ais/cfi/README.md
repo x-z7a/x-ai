@@ -1,0 +1,64 @@
+# Agentic CFI (UDP + AutoGen + X-Plane MCP)
+
+`cfi` is a standalone CFI coaching runtime for X-Plane that:
+
+1. Ingests aircraft state via native UDP (`RREF`) for low-latency monitoring.
+2. Detects immediate hazards with deterministic rules and speaks immediately via MCP.
+3. Runs a 10-agent team (9 phase experts + master CFI) every 10s over a 30s review window.
+4. Uses master-led synthesis to prevent expert argument loops.
+
+## Flight Phases
+
+- `preflight`
+- `taxi_out`
+- `takeoff`
+- `initial_climb`
+- `cruise`
+- `descent`
+- `approach`
+- `landing`
+- `taxi_in`
+
+## Quick Start
+
+```bash
+cd /Volumes/storage/git/x-ai/agentic-ais/cfi
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+cp .env.example .env
+# edit .env
+```
+
+Run continuous mode:
+
+```bash
+cfi-coach
+```
+
+Run bounded test mode:
+
+```bash
+cfi-coach --duration-sec 120 --dry-run
+```
+
+## CLI Flags
+
+- `--duration-sec <int>` run for a bounded duration
+- `--no-nonurgent-speak` mute non-urgent team speech
+- `--dry-run` skip MCP speech calls but keep decisions/logging
+
+## Logs
+
+Always-on JSONL logs:
+
+- `team.chat.log.jsonl`
+- `runtime.events.log.jsonl`
+
+Detailed telemetry is implemented but disabled by default (`CFI_TELEMETRY_ENABLED=false`).
+
+## Safety Notes
+
+- Immediate hazard speech is deterministic and does not wait for LLM output.
+- MCP command execution is implemented as an interface but disabled in v1.
+- This is a simulator assistant, not real-world flight instruction authority.

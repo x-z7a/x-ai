@@ -1,0 +1,6 @@
+autogen-agentchat<0.8.0,>=0.7.5
+autogen-ext[openai]<0.8.0,>=0.7.5
+github-copilot-sdk<0.2.0,>=0.1.1
+mcp<2.0.0,>=1.13.1
+pydantic<3.0.0,>=2.11.0
+python-dotenv<2.0.0,>=1.1.0
