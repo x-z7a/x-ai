@@ -6,6 +6,7 @@
 2. Detects immediate hazards with deterministic rules and speaks immediately via MCP.
 3. Runs a 10-agent team (9 phase experts + master CFI) every 10s over a 30s review window.
 4. Uses master-led synthesis to prevent expert argument loops.
+5. Uses an LLM startup bootstrap to infer an initial aircraft profile (for example ICAO) and generate a welcome message.
 
 ## Flight Phases
 
@@ -57,8 +58,31 @@ Always-on JSONL logs:
 
 Detailed telemetry is implemented but disabled by default (`CFI_TELEMETRY_ENABLED=false`).
 
+## Startup Behavior
+
+- On startup, CFI waits briefly for initial UDP telemetry, asks an LLM to infer session aircraft parameters (including ICAO), and stores that profile for later coaching decisions.
+- Startup LLM output also includes a plane-specific hazard profile (enabled rules + thresholds), which is applied immediately to deterministic hazard monitoring.
+- The same startup LLM pass generates a welcome message that can be spoken through MCP.
+- If bootstrap parsing fails, CFI falls back to a default `C172` profile and continues.
+
+## Shutdown Debrief
+
+- CFI auto-detects engine shutdown from UDP telemetry (engine state/RPM when available, with parked-ground fallback logic).
+- When shutdown is detected after a completed flight, CFI triggers a one-time full-flight debrief immediately and writes `engine_shutdown_detected` + `shutdown_debrief` events to `runtime.events.log.jsonl`.
+- In continuous daemon mode, post-shutdown flight activity (engine restart/taxi/takeoff) starts a fresh flight cycle so additional flights also get their own shutdown debriefs.
+- If shutdown is never detected, runtime still runs one final debrief on process exit as fallback.
+- If debrief speech is available and not suppressed by a recent urgent alert, CFI can speak final feedback.
+- `CFI_SHUTDOWN_DETECT_DWELL_SEC` tunes how long shutdown conditions must hold before triggering debrief.
+
+## Retry Behavior
+
+- If X-Plane MCP or initial connectivity is unavailable, CFI retries startup with backoff.
+- `XPLANE_RETRY_SEC` controls retry delay.
+- `XPLANE_START_MAX_RETRIES=0` means retry indefinitely.
+
 ## Safety Notes
 
 - Immediate hazard speech is deterministic and does not wait for LLM output.
+- High-risk non-urgent review findings can be promoted to a priority spoken coaching channel if normal non-urgent cadence would otherwise suppress them.
 - MCP command execution is implemented as an interface but disabled in v1.
 - This is a simulator assistant, not real-world flight instruction authority.

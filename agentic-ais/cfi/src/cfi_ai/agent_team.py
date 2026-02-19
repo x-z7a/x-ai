@@ -16,7 +16,14 @@ from autogen_core.models import ChatCompletionClient
 from cfi_ai.config import CfiConfig
 from cfi_ai.copilot_autogen_client import CopilotAutoGenClient
 from cfi_ai.memory.base import MemoryProvider
-from cfi_ai.types import FlightPhase, ReviewWindow, TeamDecision
+from cfi_ai.types import (
+    FlightPhase,
+    FlightSnapshot,
+    HazardProfile,
+    ReviewWindow,
+    SessionProfile,
+    TeamDecision,
+)
 
 
 PHASE_PROMPT_FILE: dict[FlightPhase, str] = {
@@ -30,6 +37,38 @@ PHASE_PROMPT_FILE: dict[FlightPhase, str] = {
     FlightPhase.LANDING: "phase_landing.md",
     FlightPhase.TAXI_IN: "phase_taxi_in.md",
 }
+
+STARTUP_SYSTEM_PROMPT = """
+You are a simulator CFI session bootstrap assistant.
+Use the startup telemetry summary to infer aircraft context for training.
+
+Output strict JSON only:
+{
+  "aircraft_icao": "C172",
+  "aircraft_category": "single_engine_piston",
+  "confidence": 0.0,
+  "assumptions": ["..."],
+  "welcome_message": "...",
+  "hazard_profile": {
+    "enabled_rules": ["stall_or_low_speed", "..."],
+    "thresholds": {
+      "low_airspeed_kt": 50,
+      "max_taxi_speed_kt": 30
+    },
+    "notes": ["..."]
+  }
+}
+
+Rules:
+- ICAO must be 2-4 uppercase alphanumeric characters.
+- If uncertain, default to C172 and say so in assumptions.
+- welcome_message must be concise and student-friendly.
+- Tune hazard_profile thresholds for the inferred aircraft type.
+- Only include known rule IDs:
+  stall_or_low_speed, excessive_sink_low_alt, high_bank_low_alt, pull_up_now,
+  excessive_taxi_speed, unstable_approach_fast_or_sink.
+- Focus on primary VFR GA training context.
+"""
 
 
 class CfiAgentTeam:
@@ -71,14 +110,18 @@ class CfiAgentTeam:
         self._agents.clear()
         self._phase_to_agent_name.clear()
 
-    async def run_review(self, review: ReviewWindow) -> TeamDecision:
+    async def run_review(
+        self,
+        review: ReviewWindow,
+        session_profile: SessionProfile | None = None,
+    ) -> TeamDecision:
         if self._team is None:
             raise RuntimeError("CfiAgentTeam is not started.")
 
         phase_agent = self._phase_to_agent_name[review.phase]
         self._active_expert_name = phase_agent
 
-        task = self._build_task(review)
+        task = self._build_task(review, session_profile=session_profile)
         result = await self._team.run(task=task)
         await self._team.reset()
 
@@ -86,6 +129,47 @@ class CfiAgentTeam:
 
         master_content = self._extract_master_output(result.messages)
         return self.parse_decision(master_content, review.phase)
+
+    async def bootstrap_session(self, snapshots: list[FlightSnapshot]) -> SessionProfile:
+        if self._model_client is None:
+            raise RuntimeError("CfiAgentTeam is not started.")
+
+        bootstrap_agent = AssistantAgent(
+            name="startup_bootstrapper",
+            model_client=self._model_client,
+            description="Build initial aircraft profile and welcome message.",
+            system_message=STARTUP_SYSTEM_PROMPT.strip(),
+        )
+
+        summary_payload = {
+            "startup_summary": _summarize_startup_snapshots(snapshots),
+            "defaults": {
+                "aircraft_icao": "C172",
+                "aircraft_category": "single_engine_piston",
+            },
+        }
+        task = json.dumps(summary_payload, ensure_ascii=True)
+
+        try:
+            result = await bootstrap_agent.run(task=task)
+            raw = self._extract_last_output_text(result.messages)
+            return self.parse_startup_profile(raw)
+        except Exception as exc:  # noqa: BLE001
+            default_profile = _default_hazard_profile_for_aircraft(
+                aircraft_icao="C172",
+                aircraft_category="single_engine_piston",
+            )
+            return SessionProfile(
+                aircraft_icao="C172",
+                aircraft_category="single_engine_piston",
+                confidence=0.0,
+                assumptions=[f"Bootstrap fallback due to model error: {type(exc).__name__}"],
+                welcome_message=(
+                    "Welcome aboard. We'll fly this session as a Cessna 172 profile and coach each phase."
+                ),
+                hazard_profile=default_profile,
+                raw_llm_output=str(exc),
+            )
 
     @staticmethod
     def choose_candidates(
@@ -114,12 +198,18 @@ class CfiAgentTeam:
     def parse_decision(raw_text: str, phase: FlightPhase) -> TeamDecision:
         parsed = _extract_json_object(raw_text)
         if not isinstance(parsed, dict):
+            summary = _coerce_summary_from_text(raw_text)
+            feedback = _coerce_feedback_items_from_text(raw_text)
+            inferred_speak_now, inferred_speak_text = _infer_nonurgent_speech(
+                summary,
+                feedback,
+            )
             return TeamDecision(
                 phase=phase,
-                summary="No structured decision.",
-                feedback_items=["Unable to parse master output; no spoken coaching emitted."],
-                speak_now=False,
-                speak_text="",
+                summary=summary,
+                feedback_items=feedback,
+                speak_now=inferred_speak_now,
+                speak_text=inferred_speak_text,
                 raw_master_output=raw_text,
             )
 
@@ -135,8 +225,32 @@ class CfiAgentTeam:
         if not feedback_items:
             feedback_items = ["No specific feedback items."]
 
-        speak_now = bool(parsed.get("speak_now", False))
+        speak_now_raw = parsed.get("speak_now")
+        speak_now: bool | None
+        if isinstance(speak_now_raw, bool):
+            speak_now = speak_now_raw
+        elif isinstance(speak_now_raw, (int, float)):
+            speak_now = bool(speak_now_raw)
+        else:
+            speak_now = None
+
         speak_text = str(parsed.get("speak_text", "")).strip()
+
+        if speak_now is None:
+            if speak_text:
+                speak_now = True
+            else:
+                speak_now, speak_text = _infer_nonurgent_speech(summary, feedback_items)
+        elif speak_now and not speak_text:
+            inferred_speak_now, inferred_speak_text = _infer_nonurgent_speech(
+                summary,
+                feedback_items,
+            )
+            if inferred_speak_now and inferred_speak_text:
+                speak_text = inferred_speak_text
+            else:
+                speak_now = False
+
         if not speak_text:
             speak_now = False
 
@@ -147,6 +261,73 @@ class CfiAgentTeam:
             speak_now=speak_now,
             speak_text=speak_text,
             raw_master_output=raw_text,
+        )
+
+    @staticmethod
+    def parse_startup_profile(raw_text: str) -> SessionProfile:
+        parsed = _extract_json_object(raw_text)
+        if not isinstance(parsed, dict):
+            default_profile = _default_hazard_profile_for_aircraft(
+                aircraft_icao="C172",
+                aircraft_category="single_engine_piston",
+            )
+            return SessionProfile(
+                aircraft_icao="C172",
+                aircraft_category="single_engine_piston",
+                confidence=0.0,
+                assumptions=["No valid bootstrap JSON; defaulted to C172 profile."],
+                welcome_message=(
+                    "Welcome aboard. We'll start with a Cessna 172 training profile for this lesson."
+                ),
+                hazard_profile=default_profile,
+                raw_llm_output=raw_text,
+            )
+
+        aircraft_icao = str(parsed.get("aircraft_icao", "C172")).strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,4}", aircraft_icao):
+            aircraft_icao = "C172"
+
+        aircraft_category = (
+            str(parsed.get("aircraft_category", "single_engine_piston")).strip().lower()
+            or "single_engine_piston"
+        )
+
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(confidence, 1.0))
+
+        assumptions_raw = parsed.get("assumptions", [])
+        assumptions: list[str] = []
+        if isinstance(assumptions_raw, list):
+            for item in assumptions_raw:
+                text = str(item).strip()
+                if text:
+                    assumptions.append(text)
+        if not assumptions:
+            assumptions = ["Default assumptions applied for training profile."]
+
+        welcome_message = str(parsed.get("welcome_message", "")).strip()
+        if not welcome_message:
+            welcome_message = (
+                f"Welcome aboard. We'll use a {aircraft_icao} training profile and coach each flight phase."
+            )
+
+        hazard_profile = _parse_hazard_profile(
+            raw_hazard=parsed.get("hazard_profile"),
+            aircraft_icao=aircraft_icao,
+            aircraft_category=aircraft_category,
+        )
+
+        return SessionProfile(
+            aircraft_icao=aircraft_icao,
+            aircraft_category=aircraft_category,
+            confidence=confidence,
+            assumptions=assumptions[:5],
+            welcome_message=welcome_message,
+            hazard_profile=hazard_profile,
+            raw_llm_output=raw_text,
         )
 
     def _build_agents_and_team(self) -> None:
@@ -200,15 +381,23 @@ class CfiAgentTeam:
             ),
         )
 
-    def _build_task(self, review: ReviewWindow) -> str:
+    def _build_task(
+        self,
+        review: ReviewWindow,
+        session_profile: SessionProfile | None,
+    ) -> str:
         payload = {
             "review_window": asdict(review),
+            "session_profile": asdict(session_profile) if session_profile is not None else None,
             "instructions": {
                 "turn_policy": [
                     "Phase expert provides stage-specific analysis.",
                     "Master CFI provides final JSON decision.",
                 ],
                 "output": "Master must return strict JSON only.",
+                "aircraft_constraint": (
+                    "Use session_profile.aircraft_icao and aircraft_category to tailor guidance."
+                ),
             },
         }
         return json.dumps(payload, ensure_ascii=True)
@@ -229,6 +418,14 @@ class CfiAgentTeam:
                 return content
             return str(content)
         return ""
+
+    def _extract_last_output_text(self, messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> str:
+        if not messages:
+            return ""
+        content = getattr(messages[-1], "content", "")
+        if isinstance(content, str):
+            return content
+        return str(content)
 
     def _write_team_log(
         self,
@@ -283,3 +480,282 @@ def _extract_json_object(raw_text: str) -> Any:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def _summarize_startup_snapshots(snapshots: list[FlightSnapshot]) -> dict[str, Any]:
+    if not snapshots:
+        return {
+            "sample_count": 0,
+            "hint": "No telemetry snapshots captured yet.",
+        }
+
+    ias = [s.indicated_airspeed_kt for s in snapshots if s.indicated_airspeed_kt is not None]
+    gs = [s.groundspeed_m_s for s in snapshots if s.groundspeed_m_s is not None]
+    vs = [s.vertical_speed_fpm for s in snapshots if s.vertical_speed_fpm is not None]
+    on_ground_count = sum(1 for s in snapshots if s.on_ground)
+
+    return {
+        "sample_count": len(snapshots),
+        "on_ground_fraction": float(on_ground_count) / float(len(snapshots)),
+        "ias_min_kt": min(ias) if ias else 0.0,
+        "ias_max_kt": max(ias) if ias else 0.0,
+        "gs_max_m_s": max(gs) if gs else 0.0,
+        "vs_min_fpm": min(vs) if vs else 0.0,
+        "vs_max_fpm": max(vs) if vs else 0.0,
+    }
+
+
+def _default_hazard_profile_for_aircraft(
+    *,
+    aircraft_icao: str,
+    aircraft_category: str,
+) -> HazardProfile:
+    profile = HazardProfile()
+    thresholds = dict(profile.thresholds)
+    notes: list[str] = []
+
+    cat = aircraft_category.strip().lower()
+    code = aircraft_icao.strip().upper()
+
+    if cat == "turboprop":
+        thresholds["low_airspeed_kt"] = 85.0
+        thresholds["max_taxi_speed_kt"] = 25.0
+        thresholds["unstable_approach_max_ias_kt"] = 130.0
+        notes.append("Adjusted baseline thresholds for turboprop profile.")
+    elif cat == "jet":
+        thresholds["low_airspeed_kt"] = 130.0
+        thresholds["max_taxi_speed_kt"] = 25.0
+        thresholds["unstable_approach_max_ias_kt"] = 170.0
+        notes.append("Adjusted baseline thresholds for jet profile.")
+    elif code.startswith("B7") or code.startswith("A3"):
+        thresholds["low_airspeed_kt"] = 130.0
+        thresholds["unstable_approach_max_ias_kt"] = 170.0
+        notes.append("Large transport ICAO pattern detected; raised low-speed/approach thresholds.")
+    else:
+        notes.append("Using GA baseline thresholds (C172-like) unless overridden.")
+
+    return HazardProfile(
+        enabled_rules=list(profile.enabled_rules),
+        thresholds=thresholds,
+        notes=notes,
+    )
+
+
+def _parse_hazard_profile(
+    *,
+    raw_hazard: Any,
+    aircraft_icao: str,
+    aircraft_category: str,
+) -> HazardProfile:
+    default_profile = _default_hazard_profile_for_aircraft(
+        aircraft_icao=aircraft_icao,
+        aircraft_category=aircraft_category,
+    )
+
+    if not isinstance(raw_hazard, dict):
+        return default_profile
+
+    allowed_rules = set(HazardProfile().enabled_rules)
+    enabled_rules_raw = raw_hazard.get("enabled_rules", [])
+    enabled_rules: list[str] = []
+    if isinstance(enabled_rules_raw, list):
+        for item in enabled_rules_raw:
+            rule = str(item).strip()
+            if rule in allowed_rules:
+                enabled_rules.append(rule)
+    if not enabled_rules:
+        enabled_rules = list(default_profile.enabled_rules)
+
+    thresholds = dict(default_profile.thresholds)
+    thresholds_raw = raw_hazard.get("thresholds", {})
+    if isinstance(thresholds_raw, dict):
+        for key, value in thresholds_raw.items():
+            if key not in thresholds:
+                continue
+            try:
+                thresholds[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+    notes = list(default_profile.notes)
+    notes_raw = raw_hazard.get("notes", [])
+    if isinstance(notes_raw, list):
+        parsed_notes: list[str] = []
+        for item in notes_raw:
+            text = str(item).strip()
+            if text:
+                parsed_notes.append(text)
+        if parsed_notes:
+            notes = parsed_notes[:8]
+
+    return HazardProfile(
+        enabled_rules=enabled_rules,
+        thresholds=thresholds,
+        notes=notes,
+    )
+
+
+def _coerce_summary_from_text(raw_text: str) -> str:
+    text = raw_text.strip()
+    if not text:
+        return "No structured decision."
+    first_line = text.splitlines()[0].strip()
+    if first_line:
+        return _truncate_text(first_line, max_chars=320)
+    return "No structured decision."
+
+
+def _coerce_feedback_items_from_text(raw_text: str) -> list[str]:
+    text = " ".join(line.strip() for line in raw_text.splitlines() if line.strip())
+    if not text:
+        return ["Unable to parse master output."]
+
+    segments = [segment.strip() for segment in re.split(r"[.;]", text) if segment.strip()]
+    if not segments:
+        return ["Unable to parse master output."]
+
+    out: list[str] = []
+    for seg in segments[:3]:
+        out.append(_truncate_text(seg, max_chars=240))
+    return out
+
+
+def _infer_nonurgent_speech(summary: str, feedback_items: list[str]) -> tuple[bool, str]:
+    candidates: list[str] = []
+    if summary.strip():
+        candidates.append(summary.strip())
+    for item in feedback_items:
+        text = item.strip()
+        if text:
+            candidates.append(text)
+
+    combined = " ".join(candidates).strip()
+    if not combined:
+        return False, ""
+
+    lowered = combined.lower()
+    has_risk = _contains_keyword(lowered, _RISK_KEYWORDS)
+    has_action = _contains_keyword(lowered, _ACTION_KEYWORDS)
+    has_contrast = any(token in lowered for token in ("however", " but ", "although", "yet "))
+
+    if not (has_risk or has_action or has_contrast):
+        return False, ""
+
+    if _contains_keyword(lowered, _POSITIVE_ONLY_KEYWORDS) and not (has_risk or has_action):
+        return False, ""
+
+    speak_text = _choose_spoken_text(candidates)
+    if not speak_text:
+        return False, ""
+    return True, speak_text
+
+
+def _choose_spoken_text(candidates: list[str]) -> str:
+    segments: list[str] = []
+    for text in candidates:
+        parts = [part.strip() for part in re.split(r"[.;]", text) if part.strip()]
+        segments.extend(parts)
+
+    for segment in segments:
+        cleaned = _clean_spoken_segment(segment)
+        if cleaned and _contains_keyword(cleaned.lower(), _RISK_KEYWORDS):
+            return cleaned
+
+    for segment in segments:
+        cleaned = _clean_spoken_segment(segment)
+        if cleaned and _contains_keyword(cleaned.lower(), _ACTION_KEYWORDS):
+            return cleaned
+
+    for segment in segments:
+        cleaned = _clean_spoken_segment(segment)
+        if cleaned:
+            return cleaned
+
+    return ""
+
+
+def _clean_spoken_segment(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+
+    cleaned = re.sub(r"^[A-Za-z ]{1,32} review:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(however|but|and)\s*[:,\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    clauses = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if len(clauses) > 2:
+        cleaned = ", ".join(clauses[:2])
+    cleaned = _truncate_text(cleaned, max_chars=160)
+    if not cleaned:
+        return ""
+    if cleaned[-1] not in ".!?":
+        cleaned = f"{cleaned}."
+    return cleaned
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    value = " ".join(text.split()).strip()
+    if not value:
+        return ""
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+
+    head = value[: max_chars + 1]
+    boundary = head.rfind(" ")
+    if boundary >= int(max_chars * 0.6):
+        head = head[:boundary]
+    else:
+        head = value[:max_chars]
+    head = head.rstrip(" ,;:-")
+    if not head:
+        head = value[:max_chars].rstrip(" ,;:-")
+    return f"{head}..."
+
+
+def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+_RISK_KEYWORDS: tuple[str, ...] = (
+    "stall",
+    "sink rate",
+    "high sink",
+    "hard touchdown",
+    "unstable",
+    "excessive",
+    "pull up",
+    "bank",
+    "risk",
+    "unsafe",
+    "low altitude",
+    "too fast",
+    "too slow",
+    "overspeed",
+    "underspeed",
+    "warning",
+)
+
+_ACTION_KEYWORDS: tuple[str, ...] = (
+    "maintain",
+    "reduce",
+    "increase",
+    "correct",
+    "add power",
+    "pitch",
+    "flare",
+    "aim",
+    "hold",
+    "keep",
+    "use",
+    "adjust",
+    "monitor",
+)
+
+_POSITIVE_ONLY_KEYWORDS: tuple[str, ...] = (
+    "within normal",
+    "stable",
+    "well above",
+    "on profile",
+    "no issue",
+    "no significant",
+)

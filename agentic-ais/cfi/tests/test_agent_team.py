@@ -46,7 +46,46 @@ class TestAgentTeamHelpers(unittest.TestCase):
     def test_parse_decision_fallback(self) -> None:
         decision = CfiAgentTeam.parse_decision("not json", FlightPhase.CRUISE)
         self.assertFalse(decision.speak_now)
-        self.assertIn("No structured", decision.summary)
+        self.assertEqual(decision.summary, "not json")
+
+    def test_parse_decision_fallback_actionable_text_speaks(self) -> None:
+        raw = (
+            "Landing review: Approach speed remained in range. "
+            "However, high sink rate near touchdown was detected and may cause a hard touchdown."
+        )
+        decision = CfiAgentTeam.parse_decision(raw, FlightPhase.LANDING)
+        self.assertTrue(decision.speak_now)
+        self.assertIn("sink rate", decision.speak_text.lower())
+
+    def test_parse_decision_fallback_stable_text_no_speak(self) -> None:
+        raw = (
+            "Approach remained stable with airspeed within normal range and smooth descent profile."
+        )
+        decision = CfiAgentTeam.parse_decision(raw, FlightPhase.APPROACH)
+        self.assertFalse(decision.speak_now)
+        self.assertEqual(decision.speak_text, "")
+
+    def test_parse_startup_profile_json(self) -> None:
+        raw = (
+            '{"aircraft_icao":"sr22","aircraft_category":"single_engine_piston",'
+            '"confidence":0.73,"assumptions":["Telemetry mostly ground segment"],'
+            '"welcome_message":"Welcome, we are training as SR22 today.",'
+            '"hazard_profile":{"enabled_rules":["stall_or_low_speed","excessive_taxi_speed"],'
+            '"thresholds":{"low_airspeed_kt":62,"max_taxi_speed_kt":20},'
+            '"notes":["SR22 stricter taxi profile"]}}'
+        )
+        profile = CfiAgentTeam.parse_startup_profile(raw)
+        self.assertEqual(profile.aircraft_icao, "SR22")
+        self.assertAlmostEqual(profile.confidence, 0.73, places=2)
+        self.assertIn("ground segment", profile.assumptions[0].lower())
+        self.assertIn("excessive_taxi_speed", profile.hazard_profile.enabled_rules)
+        self.assertEqual(profile.hazard_profile.thresholds["max_taxi_speed_kt"], 20.0)
+
+    def test_parse_startup_profile_fallback(self) -> None:
+        profile = CfiAgentTeam.parse_startup_profile("not-json")
+        self.assertEqual(profile.aircraft_icao, "C172")
+        self.assertGreater(len(profile.welcome_message), 0)
+        self.assertIn("excessive_taxi_speed", profile.hazard_profile.enabled_rules)
 
 
 if __name__ == "__main__":

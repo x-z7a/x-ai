@@ -31,6 +31,8 @@ class FlightSnapshot:
     roll_deg: float | None = None
     pitch_deg: float | None = None
     throttle_ratio: float | None = None
+    engine_running: bool | None = None
+    engine_rpm: float | None = None
     flap_ratio: float | None = None
     parking_brake_ratio: float | None = None
     com1_hz: int | None = None
@@ -83,6 +85,49 @@ class TeamDecision:
     speak_now: bool
     speak_text: str
     raw_master_output: str = ""
+
+
+@dataclass(frozen=True)
+class HazardProfile:
+    enabled_rules: list[str] = field(
+        default_factory=lambda: [
+            "stall_or_low_speed",
+            "excessive_sink_low_alt",
+            "high_bank_low_alt",
+            "pull_up_now",
+            "excessive_taxi_speed",
+            "unstable_approach_fast_or_sink",
+        ]
+    )
+    thresholds: dict[str, float] = field(
+        default_factory=lambda: {
+            "low_airspeed_kt": 50.0,
+            "low_airspeed_min_agl_ft": 100.0,
+            "excessive_sink_fpm": -1500.0,
+            "excessive_sink_max_agl_ft": 1000.0,
+            "high_bank_deg": 45.0,
+            "high_bank_max_agl_ft": 1000.0,
+            "pull_up_fpm": -1000.0,
+            "pull_up_max_agl_ft": 300.0,
+            "max_taxi_speed_kt": 30.0,
+            "max_taxi_ias_kt": 35.0,
+            "unstable_approach_max_ias_kt": 95.0,
+            "unstable_approach_min_sink_fpm": -1000.0,
+            "unstable_approach_max_agl_ft": 1000.0,
+        }
+    )
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SessionProfile:
+    aircraft_icao: str
+    aircraft_category: str
+    confidence: float
+    assumptions: list[str]
+    welcome_message: str
+    hazard_profile: HazardProfile = field(default_factory=HazardProfile)
+    raw_llm_output: str = ""
 
 
 class UdpStateSource(Protocol):

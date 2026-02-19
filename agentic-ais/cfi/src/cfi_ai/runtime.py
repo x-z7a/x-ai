@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
@@ -16,13 +18,43 @@ from cfi_ai.memory.base import MemoryProvider
 from cfi_ai.memory.providers import create_memory_provider
 from cfi_ai.review_window import ReviewWindowBuilder
 from cfi_ai.types import (
+    FlightSnapshot,
     FlightPhase,
     PhaseState,
+    ReviewWindow,
+    SessionProfile,
     SpeechSink,
     TeamDecision,
     UdpStateSource,
 )
 from cfi_ai.xplane_udp import XPlaneUdpClient
+
+AIRBORNE_PHASES: set[FlightPhase] = {
+    FlightPhase.TAKEOFF,
+    FlightPhase.INITIAL_CLIMB,
+    FlightPhase.CRUISE,
+    FlightPhase.DESCENT,
+    FlightPhase.APPROACH,
+    FlightPhase.LANDING,
+}
+
+PRIORITY_REVIEW_KEYWORDS: tuple[str, ...] = (
+    "high sink",
+    "sink rate",
+    "hard touchdown",
+    "steep bank",
+    "unstable",
+    "hazard",
+    "hazardous",
+    "risk",
+    "unsafe",
+    "low-energy",
+    "critical",
+    "immediate correction",
+    "immediate coaching",
+    "poor control",
+    "stall",
+)
 
 
 class TeamRunner(Protocol):
@@ -30,7 +62,13 @@ class TeamRunner(Protocol):
 
     async def stop(self) -> None: ...
 
-    async def run_review(self, review: Any) -> TeamDecision: ...
+    async def run_review(
+        self,
+        review: Any,
+        session_profile: SessionProfile | None = None,
+    ) -> TeamDecision: ...
+
+    async def bootstrap_session(self, snapshots: list[Any]) -> SessionProfile: ...
 
 
 class JsonlLogger:
@@ -122,11 +160,27 @@ class CfiRuntime:
             previous_phase=None,
             changed_at_epoch=None,
         )
+        self._session_profile: SessionProfile | None = None
+        self._hazard_events_count = 0
+        self._hazard_alert_counts: dict[str, int] = {}
+        self._session_snapshots: list[FlightSnapshot] = []
+        self._phase_path: list[FlightPhase] = [FlightPhase.PREFLIGHT]
+        self._saw_airborne_segment = False
+        self._shutdown_candidate_since: float | None = None
+        self._shutdown_debrief_emitted = False
+        self._flight_index = 1
 
     async def start(self) -> None:
-        await self._speech.start()
-        await self._udp.start()
+        await self._start_with_retry(
+            label="X-Plane UDP",
+            starter=self._udp.start,
+        )
+        await self._start_with_retry(
+            label="X-Plane MCP speech",
+            starter=self._speech.start,
+        )
         await self._team.start()
+        await self._bootstrap_session_profile()
 
     async def stop(self) -> None:
         await self._team.stop()
@@ -137,15 +191,19 @@ class CfiRuntime:
         self._stop_event.set()
 
     async def run(self, duration_sec: float | None = None) -> None:
-        await self.start()
-        start_epoch = time.time()
-        next_review_epoch = start_epoch + self._config.review_tick_sec
-
+        started = False
+        stop_reason = "unknown"
         try:
+            await self.start()
+            started = True
+            start_epoch = time.time()
+            next_review_epoch = start_epoch + self._config.review_tick_sec
+
             while not self._stop_event.is_set():
                 now = time.time()
                 if duration_sec is not None and duration_sec > 0:
                     if now - start_epoch >= duration_sec:
+                        stop_reason = "duration_elapsed"
                         break
 
                 snapshot = self._udp.latest()
@@ -158,13 +216,31 @@ class CfiRuntime:
                     next_review_epoch = now + self._config.review_tick_sec
 
                 await asyncio.sleep(0.05)
+
+            if self._stop_event.is_set():
+                stop_reason = "stop_requested"
+            if stop_reason == "unknown":
+                stop_reason = "loop_exit"
         finally:
-            await self.stop()
+            if started:
+                with suppress(Exception):
+                    await self._run_shutdown_debrief(stop_reason)
+                await self.stop()
 
     async def _process_snapshot(self, snapshot: Any) -> None:
+        await self._maybe_start_new_flight_cycle(snapshot)
+
+        self._session_snapshots.append(snapshot)
+        if len(self._session_snapshots) > 100_000:
+            self._session_snapshots = self._session_snapshots[-100_000:]
+
         self._phase_state = self._phase_tracker.update(snapshot)
+        if (not snapshot.on_ground) or self._phase_state.phase in AIRBORNE_PHASES:
+            self._saw_airborne_segment = True
 
         if self._phase_state.changed:
+            if self._phase_path[-1] != self._phase_state.phase:
+                self._phase_path.append(self._phase_state.phase)
             msg = (
                 f"[PHASE] {self._phase_state.previous_phase.value if self._phase_state.previous_phase else 'none'}"
                 f" -> {self._phase_state.phase.value}"
@@ -198,6 +274,8 @@ class CfiRuntime:
 
         alerts = self._hazard_monitor.evaluate(snapshot, self._phase_state)
         for alert in alerts:
+            self._hazard_events_count += 1
+            self._hazard_alert_counts[alert.alert_id] = self._hazard_alert_counts.get(alert.alert_id, 0) + 1
             did_speak = await self._speech.speak_urgent(alert.speak_text, alert.alert_id)
             self._runtime_log.write(
                 {
@@ -220,18 +298,21 @@ class CfiRuntime:
                 print(f"[URGENT] {alert.speak_text}")
                 self._telemetry.emit("urgent_alert_spoken", 1.0, {"alert_id": alert.alert_id})
 
+        await self._maybe_trigger_shutdown_debrief(snapshot)
+
     async def _run_nonurgent_review(self, now_epoch: float) -> None:
         snapshots = self._udp.window(self._config.review_window_sec)
         if not snapshots:
             return
 
         review = self._review_builder.build(snapshots, self._phase_state.phase)
-        decision = await self._team.run_review(review)
+        decision = await self._team.run_review(review, session_profile=self._session_profile)
 
         self._runtime_log.write(
             {
                 "ts": now_epoch,
                 "event": "team_decision",
+                "flight_index": self._flight_index,
                 "phase": self._phase_state.phase.value,
                 "review_window": asdict(review),
                 "decision": asdict(decision),
@@ -251,8 +332,24 @@ class CfiRuntime:
 
         if not self._nonurgent_speak_enabled:
             return
-        if not decision.speak_now or not decision.speak_text.strip():
+        if self._shutdown_debrief_emitted:
             return
+
+        priority_review = _is_priority_review(decision)
+        coach_text = _select_coach_text(decision)
+        if not decision.speak_now and not priority_review:
+            return
+        if not coach_text:
+            self._runtime_log.write(
+                {
+                    "ts": now_epoch,
+                    "event": "nonurgent_speech_skipped",
+                    "phase": self._phase_state.phase.value,
+                    "reason": "empty_coach_text",
+                }
+            )
+            return
+
         if self._speech.recent_urgent(self._config.nonurgent_suppress_after_urgent_sec):
             self._runtime_log.write(
                 {
@@ -264,16 +361,409 @@ class CfiRuntime:
             )
             return
 
-        spoke = await self._speech.speak_nonurgent(decision.speak_text.strip())
+        spoke = await self._speech.speak_nonurgent(coach_text)
+        channel = "nonurgent"
+        if not spoke and priority_review:
+            key = f"priority_review_{self._phase_state.phase.value}"
+            spoke = await self._speech.speak_urgent(coach_text, key)
+            channel = "priority_review_fallback"
+
         self._runtime_log.write(
             {
                 "ts": time.time(),
                 "event": "nonurgent_speech",
                 "phase": self._phase_state.phase.value,
                 "spoken": spoke,
-                "text": decision.speak_text.strip(),
+                "text": coach_text,
+                "channel": channel,
+                "priority_review": priority_review,
             }
         )
         if spoke:
-            print(f"[COACH] {decision.speak_text.strip()}")
+            print(f"[COACH] {coach_text}")
             self._telemetry.emit("nonurgent_speech_spoken", 1.0, {"phase": self._phase_state.phase.value})
+
+    async def _start_with_retry(self, *, label: str, starter: Any) -> None:
+        attempt = 0
+        max_attempts = self._config.xplane_start_max_retries
+        while True:
+            attempt += 1
+            try:
+                await starter()
+                if attempt > 1:
+                    print(f"[RETRY] {label} connected on attempt {attempt}.")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._runtime_log.write(
+                    {
+                        "ts": time.time(),
+                        "event": "startup_retry",
+                        "component": label,
+                        "attempt": attempt,
+                        "error": str(exc),
+                    }
+                )
+                print(
+                    f"[RETRY] {label} unavailable: {exc}. "
+                    f"Retrying in {self._config.xplane_retry_sec:.1f}s."
+                )
+                if max_attempts > 0 and attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"{label} failed to start after {attempt} attempts."
+                    ) from exc
+                await asyncio.sleep(self._config.xplane_retry_sec)
+
+    async def _bootstrap_session_profile(self) -> None:
+        start = time.time()
+        snapshots = self._udp.window(self._config.startup_bootstrap_wait_sec)
+        while (
+            len(snapshots) < 3
+            and time.time() - start < self._config.startup_bootstrap_wait_sec
+        ):
+            await asyncio.sleep(0.2)
+            snapshots = self._udp.window(self._config.startup_bootstrap_wait_sec)
+
+        try:
+            self._session_profile = await self._team.bootstrap_session(snapshots)
+        except Exception as exc:  # noqa: BLE001
+            self._session_profile = SessionProfile(
+                aircraft_icao="C172",
+                aircraft_category="single_engine_piston",
+                confidence=0.0,
+                assumptions=[f"Bootstrap fallback due to startup error: {type(exc).__name__}"],
+                welcome_message=(
+                    "Welcome aboard. We'll use a Cessna 172 baseline profile and start coaching each phase."
+                ),
+                raw_llm_output=str(exc),
+            )
+        await self._memory.record_event(
+            "session_profile",
+            asdict(self._session_profile),
+        )
+        self._runtime_log.write(
+            {
+                "ts": time.time(),
+                "event": "session_profile_initialized",
+                "profile": asdict(self._session_profile),
+                "snapshot_count": len(snapshots),
+            }
+        )
+        self._hazard_monitor.set_hazard_profile(self._session_profile.hazard_profile)
+        print(
+            "[BOOTSTRAP] "
+            f"aircraft={self._session_profile.aircraft_icao} "
+            f"confidence={self._session_profile.confidence:.2f}"
+        )
+
+        if self._nonurgent_speak_enabled and self._session_profile.welcome_message.strip():
+            spoke = await self._speech.speak_nonurgent(
+                self._session_profile.welcome_message.strip()
+            )
+            self._runtime_log.write(
+                {
+                    "ts": time.time(),
+                    "event": "startup_welcome",
+                    "spoken": spoke,
+                    "text": self._session_profile.welcome_message.strip(),
+                }
+            )
+            if spoke:
+                print(f"[WELCOME] {self._session_profile.welcome_message.strip()}")
+
+    async def _run_shutdown_debrief(self, reason: str) -> None:
+        if self._shutdown_debrief_emitted:
+            return
+
+        snapshots = list(self._session_snapshots)
+        if not snapshots:
+            window_sec = max(60.0, self._config.review_window_sec)
+            snapshots = self._udp.window(window_sec)
+        if not snapshots:
+            self._runtime_log.write(
+                {
+                    "ts": time.time(),
+                    "event": "shutdown_debrief_skipped",
+                    "reason": reason,
+                    "details": "No snapshots available.",
+                }
+            )
+            return
+
+        review = self._build_shutdown_review(snapshots)
+        try:
+            decision = await self._team.run_review(review, session_profile=self._session_profile)
+        except Exception as exc:  # noqa: BLE001
+            self._runtime_log.write(
+                {
+                    "ts": time.time(),
+                    "event": "shutdown_debrief_failed",
+                    "reason": reason,
+                    "error": str(exc),
+                }
+            )
+            return
+
+        self._runtime_log.write(
+            {
+                "ts": time.time(),
+                "event": "shutdown_debrief",
+                "flight_index": self._flight_index,
+                "reason": reason,
+                "phase": self._phase_state.phase.value,
+                "review_window": asdict(review),
+                "decision": asdict(decision),
+                "hazard_events_count": self._hazard_events_count,
+            }
+        )
+        await self._memory.record_event(
+            "shutdown_debrief",
+            {
+                "reason": reason,
+                "phase": self._phase_state.phase.value,
+                "review_window": asdict(review),
+                "decision": asdict(decision),
+                "hazard_events_count": self._hazard_events_count,
+            },
+        )
+        self._shutdown_debrief_emitted = True
+
+        print(f"[SHUTDOWN REVIEW] {decision.summary}")
+
+        if self._nonurgent_speak_enabled and decision.speak_text.strip():
+            if self._speech.recent_urgent(self._config.nonurgent_suppress_after_urgent_sec):
+                self._runtime_log.write(
+                    {
+                        "ts": time.time(),
+                        "event": "shutdown_debrief_speech_suppressed",
+                        "reason": "recent_urgent",
+                    }
+                )
+            else:
+                spoke = await self._speech.speak_nonurgent(decision.speak_text.strip())
+                self._runtime_log.write(
+                    {
+                        "ts": time.time(),
+                        "event": "shutdown_debrief_speech",
+                        "spoken": spoke,
+                        "text": decision.speak_text.strip(),
+                    }
+                )
+
+    async def _maybe_trigger_shutdown_debrief(self, snapshot: FlightSnapshot) -> None:
+        if self._shutdown_debrief_emitted:
+            return
+        if not self._saw_airborne_segment:
+            return
+
+        if not self._is_shutdown_candidate(snapshot):
+            self._shutdown_candidate_since = None
+            return
+
+        if self._shutdown_candidate_since is None:
+            self._shutdown_candidate_since = snapshot.timestamp_sec
+            return
+
+        dwell_sec = snapshot.timestamp_sec - self._shutdown_candidate_since
+        if dwell_sec < self._config.shutdown_detect_dwell_sec:
+            return
+
+        self._runtime_log.write(
+            {
+                "ts": time.time(),
+                "event": "engine_shutdown_detected",
+                "flight_index": self._flight_index,
+                "phase": self._phase_state.phase.value,
+                "dwell_sec": dwell_sec,
+            }
+        )
+        print("[SHUTDOWN] Engine shutdown detected, running full-flight debrief.")
+        await self._run_shutdown_debrief("engine_shutdown_detected")
+
+    def _is_shutdown_candidate(self, snapshot: FlightSnapshot) -> bool:
+        if not snapshot.on_ground:
+            return False
+        if self._phase_state.phase not in {FlightPhase.TAXI_IN, FlightPhase.PREFLIGHT}:
+            return False
+
+        gs_kt = (snapshot.groundspeed_m_s or 0.0) * 1.94384
+        ias = snapshot.indicated_airspeed_kt or 0.0
+        throttle = snapshot.throttle_ratio or 0.0
+        park = snapshot.parking_brake_ratio or 0.0
+
+        if gs_kt > 2.0 or ias > 8.0 or throttle > 0.12:
+            return False
+
+        if snapshot.engine_running is not None:
+            return not snapshot.engine_running
+        if snapshot.engine_rpm is not None:
+            return snapshot.engine_rpm <= 200.0
+
+        return park >= 0.5
+
+    async def _maybe_start_new_flight_cycle(self, snapshot: FlightSnapshot) -> None:
+        if not self._shutdown_debrief_emitted:
+            return
+        if not self._is_new_flight_activity(snapshot):
+            return
+
+        self._flight_index += 1
+        self._reset_flight_cycle_state()
+        self._runtime_log.write(
+            {
+                "ts": time.time(),
+                "event": "flight_cycle_started",
+                "flight_index": self._flight_index,
+                "reason": "post_shutdown_activity",
+            }
+        )
+        await self._memory.record_event(
+            "flight_cycle_started",
+            {
+                "flight_index": self._flight_index,
+                "reason": "post_shutdown_activity",
+            },
+        )
+        print(f"[FLIGHT] New flight cycle started: #{self._flight_index}")
+
+    def _is_new_flight_activity(self, snapshot: FlightSnapshot) -> bool:
+        gs_kt = (snapshot.groundspeed_m_s or 0.0) * 1.94384
+        ias = snapshot.indicated_airspeed_kt or 0.0
+        throttle = snapshot.throttle_ratio or 0.0
+        parking_brake = snapshot.parking_brake_ratio or 0.0
+
+        engine_on = False
+        if snapshot.engine_running is not None:
+            engine_on = snapshot.engine_running
+        elif snapshot.engine_rpm is not None:
+            engine_on = snapshot.engine_rpm > 500.0
+
+        if not snapshot.on_ground:
+            return True
+
+        if not engine_on:
+            return False
+        if throttle > 0.22:
+            return True
+        if gs_kt > 3.0:
+            return True
+        if ias > 10.0:
+            return True
+        if parking_brake < 0.2 and gs_kt > 1.5:
+            return True
+        return False
+
+    def _reset_flight_cycle_state(self) -> None:
+        self._phase_tracker = FlightPhaseTracker()
+        self._review_builder = ReviewWindowBuilder()
+        self._phase_state = PhaseState(
+            phase=FlightPhase.PREFLIGHT,
+            confidence=0.0,
+            changed=False,
+            previous_phase=None,
+            changed_at_epoch=None,
+        )
+        self._hazard_events_count = 0
+        self._hazard_alert_counts = {}
+        self._session_snapshots = []
+        self._phase_path = [FlightPhase.PREFLIGHT]
+        self._saw_airborne_segment = False
+        self._shutdown_candidate_since = None
+        self._shutdown_debrief_emitted = False
+
+    def _build_shutdown_review(self, snapshots: list[FlightSnapshot]) -> ReviewWindow:
+        sampled = _downsample_snapshots(snapshots, max_samples=1800)
+        review = self._review_builder.build(sampled, self._phase_state.phase)
+
+        duration_sec = max(0.0, snapshots[-1].timestamp_sec - snapshots[0].timestamp_sec)
+        phase_path = " -> ".join(phase.value for phase in self._phase_path)
+        top_alerts = ", ".join(
+            f"{alert_id} x{count}"
+            for alert_id, count in sorted(
+                self._hazard_alert_counts.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:4]
+        )
+        if not top_alerts:
+            top_alerts = "none"
+
+        hints = list(review.event_hints)
+        hints.extend(
+            [
+                (
+                    f"Full-flight debrief across {duration_sec:.0f} seconds and "
+                    f"{len(snapshots)} snapshots."
+                ),
+                f"Phase path: {phase_path}.",
+                f"Urgent alerts triggered: {self._hazard_events_count}.",
+                f"Top urgent alerts: {top_alerts}.",
+            ]
+        )
+
+        return ReviewWindow(
+            start_epoch=snapshots[0].timestamp_sec,
+            end_epoch=snapshots[-1].timestamp_sec,
+            phase=self._phase_state.phase,
+            sample_count=len(sampled),
+            metrics=review.metrics,
+            event_hints=hints[:12],
+        )
+
+
+def _downsample_snapshots(snapshots: list[FlightSnapshot], max_samples: int) -> list[FlightSnapshot]:
+    if max_samples <= 0 or len(snapshots) <= max_samples:
+        return snapshots
+
+    step = max(1, len(snapshots) // max_samples)
+    sampled = snapshots[::step]
+    if len(sampled) >= max_samples:
+        sampled = sampled[: max_samples - 1]
+    if sampled[-1].timestamp_sec != snapshots[-1].timestamp_sec:
+        sampled.append(snapshots[-1])
+    return sampled
+
+
+def _is_priority_review(decision: TeamDecision) -> bool:
+    corpus_parts = [decision.summary, decision.speak_text]
+    corpus_parts.extend(decision.feedback_items)
+    corpus = " ".join(part.strip().lower() for part in corpus_parts if part and part.strip())
+    if not corpus:
+        return False
+    return any(keyword in corpus for keyword in PRIORITY_REVIEW_KEYWORDS)
+
+
+def _select_coach_text(decision: TeamDecision) -> str:
+    if decision.speak_text.strip():
+        return _normalize_speech_text(decision.speak_text)
+    for item in decision.feedback_items:
+        if item.strip():
+            return _normalize_speech_text(item)
+    if decision.summary.strip():
+        return _normalize_speech_text(decision.summary)
+    return ""
+
+
+def _normalize_speech_text(text: str, max_chars: int = 160) -> str:
+    cleaned = " ".join(text.split()).strip()
+    cleaned = re.sub(r"^[A-Za-z ]{1,32} review:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(however|but|and)\s*[:,\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+    if not cleaned:
+        return ""
+    cleaned = _truncate_text_boundary(cleaned, max_chars=max_chars)
+    if cleaned and cleaned[-1] not in ".!?":
+        cleaned = f"{cleaned}."
+    return cleaned
+
+
+def _truncate_text_boundary(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    head = text[: max_chars + 1]
+    boundary = head.rfind(" ")
+    if boundary >= int(max_chars * 0.6):
+        head = head[:boundary]
+    else:
+        head = text[:max_chars]
+    return head.rstrip(" ,;:-")

@@ -35,6 +35,9 @@ class CfiConfig:
     xplane_udp_port: int
     xplane_udp_local_port: int
     xplane_rref_hz: int
+    xplane_retry_sec: float
+    xplane_start_max_retries: int
+    startup_bootstrap_wait_sec: float
 
     xplane_mcp_sse_url: str
     enable_mcp_commands: bool
@@ -56,6 +59,7 @@ class CfiConfig:
     urgent_cooldown_sec: float
     nonurgent_cooldown_sec: float
     nonurgent_suppress_after_urgent_sec: float
+    shutdown_detect_dwell_sec: float
 
     memory_backend: str
     telemetry_enabled: bool
@@ -102,6 +106,9 @@ class CfiConfig:
             xplane_udp_port=_int_env("XPLANE_UDP_PORT", 49000),
             xplane_udp_local_port=_int_env("XPLANE_UDP_LOCAL_PORT", 49001),
             xplane_rref_hz=_int_env("XPLANE_RREF_HZ", 10),
+            xplane_retry_sec=_float_env("XPLANE_RETRY_SEC", 3.0),
+            xplane_start_max_retries=_int_env("XPLANE_START_MAX_RETRIES", 0),
+            startup_bootstrap_wait_sec=_float_env("CFI_STARTUP_BOOTSTRAP_WAIT_SEC", 8.0),
             xplane_mcp_sse_url=os.getenv("XPLANE_MCP_SSE_URL", "http://127.0.0.1:8765/sse").strip(),
             enable_mcp_commands=_bool_env("CFI_ENABLE_MCP_COMMANDS", default=False),
             github_token=github_token,
@@ -119,6 +126,7 @@ class CfiConfig:
             urgent_cooldown_sec=_float_env("CFI_URGENT_COOLDOWN_SEC", 8.0),
             nonurgent_cooldown_sec=_float_env("CFI_NONURGENT_COOLDOWN_SEC", 45.0),
             nonurgent_suppress_after_urgent_sec=_float_env("CFI_NONURGENT_SUPPRESS_AFTER_URGENT_SEC", 12.0),
+            shutdown_detect_dwell_sec=_float_env("CFI_SHUTDOWN_DETECT_DWELL_SEC", 8.0),
             memory_backend=os.getenv("CFI_MEMORY_BACKEND", "none").strip().lower(),
             telemetry_enabled=_bool_env("CFI_TELEMETRY_ENABLED", default=False),
             team_chat_log_path=team_chat_log_path,
@@ -135,12 +143,20 @@ class CfiConfig:
             raise ValueError("XPLANE_UDP_LOCAL_PORT must be > 0.")
         if self.xplane_rref_hz <= 0:
             raise ValueError("XPLANE_RREF_HZ must be > 0.")
+        if self.xplane_retry_sec <= 0:
+            raise ValueError("XPLANE_RETRY_SEC must be > 0.")
+        if self.xplane_start_max_retries < 0:
+            raise ValueError("XPLANE_START_MAX_RETRIES must be >= 0.")
+        if self.startup_bootstrap_wait_sec < 0:
+            raise ValueError("CFI_STARTUP_BOOTSTRAP_WAIT_SEC must be >= 0.")
         if not self.xplane_mcp_sse_url:
             raise ValueError("XPLANE_MCP_SSE_URL is required.")
         if not self.autogen_model:
             raise ValueError("AUTOGEN_MODEL is required.")
         if self.review_window_sec <= 0 or self.review_tick_sec <= 0:
             raise ValueError("CFI_REVIEW_WINDOW_SEC and CFI_REVIEW_TICK_SEC must be > 0.")
+        if self.shutdown_detect_dwell_sec <= 0:
+            raise ValueError("CFI_SHUTDOWN_DETECT_DWELL_SEC must be > 0.")
         if self.memory_backend not in {"none", "list"}:
             raise ValueError("CFI_MEMORY_BACKEND must be one of: none, list")
         if self.copilot_use_custom_provider:

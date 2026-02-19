@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from cfi_ai.hazard_monitor import HazardMonitor
-from cfi_ai.types import FlightPhase, FlightSnapshot, PhaseState
+from cfi_ai.types import FlightPhase, FlightSnapshot, HazardProfile, PhaseState
 
 
 def _phase() -> PhaseState:
@@ -68,6 +68,39 @@ class TestHazardMonitor(unittest.TestCase):
         )
         alerts = monitor.evaluate(snapshot, _phase())
         self.assertEqual(alerts, [])
+
+    def test_excessive_taxi_speed_alert(self) -> None:
+        monitor = HazardMonitor(urgent_cooldown_sec=8.0)
+        snapshot = FlightSnapshot(
+            timestamp_sec=20.0,
+            on_ground=True,
+            groundspeed_m_s=20.0,  # ~39 kt
+            indicated_airspeed_kt=41.0,
+        )
+        alerts = monitor.evaluate(snapshot, _phase())
+        alert_ids = {a.alert_id for a in alerts}
+        self.assertIn("excessive_taxi_speed", alert_ids)
+
+    def test_plane_specific_threshold_profile(self) -> None:
+        profile = HazardProfile(
+            enabled_rules=["stall_or_low_speed"],
+            thresholds={
+                "low_airspeed_kt": 120.0,
+                "low_airspeed_min_agl_ft": 100.0,
+            },
+            notes=["Jet-like low-speed threshold for test."],
+        )
+        monitor = HazardMonitor(urgent_cooldown_sec=8.0, hazard_profile=profile)
+        snapshot = FlightSnapshot(
+            timestamp_sec=25.0,
+            on_ground=False,
+            indicated_airspeed_kt=110.0,
+            elevation_m=500.0,
+            vertical_speed_fpm=0.0,
+        )
+        alerts = monitor.evaluate(snapshot, _phase())
+        alert_ids = {a.alert_id for a in alerts}
+        self.assertIn("stall_or_low_speed", alert_ids)
 
 
 if __name__ == "__main__":

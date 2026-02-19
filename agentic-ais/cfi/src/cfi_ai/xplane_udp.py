@@ -27,6 +27,8 @@ DATAREF_BY_KEY: dict[str, str] = {
     "roll_deg": "sim/flightmodel/position/phi",
     "pitch_deg": "sim/flightmodel/position/theta",
     "throttle_ratio": "sim/cockpit2/engine/actuators/throttle_ratio_all",
+    "engine_running": "sim/flightmodel/engine/ENGN_running[0]",
+    "engine_rpm": "sim/cockpit2/engine/indicators/engine_speed_rpm[0]",
     "flap_ratio": "sim/flightmodel/controls/flaprqst",
     "parking_brake_ratio": "sim/cockpit2/controls/parking_brake_ratio",
     "on_ground": "sim/flightmodel/failures/onground_any",
@@ -185,6 +187,10 @@ class XPlaneUdpClient(UdpStateSource):
 
         on_ground = (_f("on_ground") or 0.0) >= 0.5
         stall_warning = (_f("stall_warning") or 0.0) >= 0.5
+        engine_running_raw = _f("engine_running")
+        engine_running: bool | None = None
+        if engine_running_raw is not None:
+            engine_running = engine_running_raw >= 0.5
 
         return FlightSnapshot(
             timestamp_sec=timestamp_sec,
@@ -199,6 +205,8 @@ class XPlaneUdpClient(UdpStateSource):
             roll_deg=_f("roll_deg"),
             pitch_deg=_f("pitch_deg"),
             throttle_ratio=_f("throttle_ratio"),
+            engine_running=engine_running,
+            engine_rpm=_f("engine_rpm"),
             flap_ratio=_f("flap_ratio"),
             parking_brake_ratio=_f("parking_brake_ratio"),
             com1_hz=_i("com1_hz"),
