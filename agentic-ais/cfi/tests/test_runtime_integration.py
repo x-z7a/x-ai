@@ -167,6 +167,34 @@ class _RefreshingTeam(_FakeTeam):
         }
 
 
+class _LowValueSpeakTeam(_FakeTeam):
+    async def run_review(self, review, session_profile: SessionProfile | None = None) -> TeamDecision:
+        del session_profile
+        self.calls += 1
+        return TeamDecision(
+            phase=review.phase,
+            summary="No taxi movement detected.",
+            feedback_items=["No issues observed in this window."],
+            speak_now=True,
+            speak_text="No evidence of movement detected. Awaiting more data.",
+            raw_master_output="{}",
+        )
+
+
+class _RobotToneTeam(_FakeTeam):
+    async def run_review(self, review, session_profile: SessionProfile | None = None) -> TeamDecision:
+        del session_profile
+        self.calls += 1
+        return TeamDecision(
+            phase=review.phase,
+            summary="Steep bank was observed during initial climb.",
+            feedback_items=["This indicates low-energy flight and immediate coaching is needed on Vy discipline."],
+            speak_now=True,
+            speak_text="Steep bank was observed during initial climb.",
+            raw_master_output="{}",
+        )
+
+
 def _config(tmpdir: str) -> CfiConfig:
     return CfiConfig(
         xplane_udp_host="127.0.0.1",
@@ -285,6 +313,59 @@ class TestRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             await runtime.run(duration_sec=0.25)
 
             self.assertGreaterEqual(len(speech.nonurgent_calls), 1)
+
+    async def test_low_value_no_evidence_text_not_spoken(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _config(tmpdir)
+            snapshot = FlightSnapshot(
+                timestamp_sec=time.time(),
+                on_ground=True,
+                elevation_m=100.0,
+                groundspeed_m_s=0.0,
+                indicated_airspeed_kt=0.0,
+                vertical_speed_fpm=0.0,
+            )
+            udp = _FakeUdp([snapshot])
+            speech = _FakeSpeech()
+            team = _LowValueSpeakTeam(speak_now=True)
+
+            runtime = CfiRuntime(
+                cfg,
+                udp_source=udp,
+                speech_sink=speech,
+                team_runner=team,
+            )
+            await runtime.run(duration_sec=0.25)
+
+            self.assertEqual(len(speech.nonurgent_calls), 1)  # startup welcome only
+            self.assertNotIn("No evidence of movement detected.", " ".join(speech.nonurgent_calls))
+
+    async def test_robotic_coach_text_humanized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _config(tmpdir)
+            snapshot = FlightSnapshot(
+                timestamp_sec=time.time(),
+                on_ground=True,
+                elevation_m=100.0,
+                groundspeed_m_s=0.0,
+                indicated_airspeed_kt=0.0,
+                vertical_speed_fpm=0.0,
+            )
+            udp = _FakeUdp([snapshot])
+            speech = _FakeSpeech()
+            team = _RobotToneTeam(speak_now=True)
+
+            runtime = CfiRuntime(
+                cfg,
+                udp_source=udp,
+                speech_sink=speech,
+                team_runner=team,
+            )
+            await runtime.run(duration_sec=0.25)
+
+            coach_calls = [msg for msg in speech.nonurgent_calls if "Welcome to CFI training." not in msg]
+            self.assertGreaterEqual(len(coach_calls), 1)
+            self.assertNotIn("was observed", coach_calls[0].lower())
 
     async def test_runtime_hazard_phrase_refresh_applies(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

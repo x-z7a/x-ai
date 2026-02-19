@@ -56,6 +56,37 @@ PRIORITY_REVIEW_KEYWORDS: tuple[str, ...] = (
     "stall",
 )
 
+LOW_VALUE_COACH_MARKERS: tuple[str, ...] = (
+    "no evidence",
+    "no movement",
+    "no issues",
+    "no hazards",
+    "no hazard",
+    "awaiting",
+    "not assessable",
+    "not applicable",
+    "no data",
+    "stationary",
+)
+
+ACTIONABLE_COACH_KEYWORDS: tuple[str, ...] = (
+    "maintain",
+    "focus",
+    "review",
+    "practice",
+    "correct",
+    "reduce",
+    "increase",
+    "hold",
+    "keep",
+    "use",
+    "monitor",
+    "recover",
+    "go-around",
+    "go around",
+    "let's",
+)
+
 
 class TeamRunner(Protocol):
     async def start(self) -> None: ...
@@ -360,6 +391,17 @@ class CfiRuntime:
                 }
             )
             return
+        if _is_low_value_coach_text(coach_text) and not priority_review:
+            self._runtime_log.write(
+                {
+                    "ts": now_epoch,
+                    "event": "nonurgent_speech_skipped",
+                    "phase": self._phase_state.phase.value,
+                    "reason": "low_value_text",
+                    "text": coach_text,
+                }
+            )
+            return
 
         if self._speech.recent_urgent(self._config.nonurgent_suppress_after_urgent_sec):
             self._runtime_log.write(
@@ -466,6 +508,10 @@ class CfiRuntime:
             "[BOOTSTRAP] "
             f"aircraft={self._session_profile.aircraft_icao} "
             f"confidence={self._session_profile.confidence:.2f}"
+        )
+        print(
+            "[BOOTSTRAP PROFILE] "
+            + json.dumps(_profile_console_payload(self._session_profile), ensure_ascii=True)
         )
 
         if self._nonurgent_speak_enabled and self._session_profile.welcome_message.strip():
@@ -606,8 +652,18 @@ class CfiRuntime:
 
         print(f"[SHUTDOWN REVIEW] {decision.summary}")
 
-        if self._nonurgent_speak_enabled and decision.speak_text.strip():
-            if self._speech.recent_urgent(self._config.nonurgent_suppress_after_urgent_sec):
+        shutdown_text = _select_coach_text(decision)
+        if self._nonurgent_speak_enabled and shutdown_text:
+            if _is_low_value_coach_text(shutdown_text):
+                self._runtime_log.write(
+                    {
+                        "ts": time.time(),
+                        "event": "shutdown_debrief_speech_suppressed",
+                        "reason": "low_value_text",
+                        "text": shutdown_text,
+                    }
+                )
+            elif self._speech.recent_urgent(self._config.nonurgent_suppress_after_urgent_sec):
                 self._runtime_log.write(
                     {
                         "ts": time.time(),
@@ -616,13 +672,13 @@ class CfiRuntime:
                     }
                 )
             else:
-                spoke = await self._speech.speak_nonurgent(decision.speak_text.strip())
+                spoke = await self._speech.speak_nonurgent(shutdown_text)
                 self._runtime_log.write(
                     {
                         "ts": time.time(),
                         "event": "shutdown_debrief_speech",
                         "spoken": spoke,
-                        "text": decision.speak_text.strip(),
+                        "text": shutdown_text,
                     }
                 )
 
@@ -824,12 +880,50 @@ def _normalize_speech_text(text: str, max_chars: int = 160) -> str:
     cleaned = " ".join(text.split()).strip()
     cleaned = re.sub(r"^[A-Za-z ]{1,32} review:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^(however|but|and)\s*[:,\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _humanize_coach_text(cleaned)
     if not cleaned:
         return ""
     cleaned = _truncate_text_boundary(cleaned, max_chars=max_chars)
     if cleaned and cleaned[-1] not in ".!?":
         cleaned = f"{cleaned}."
     return cleaned
+
+
+def _humanize_coach_text(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"\([^)]{1,40}\)", "", cleaned)
+    cleaned = re.sub(r"\bthis indicates\b", "That means", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bit indicates\b", "That means", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bwas observed\b", "was noted", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bwere observed\b", "were noted", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bwas detected\b", "was noted", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bwere detected\b", "were noted", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bimmediate coaching is needed on\b", "Let's focus on", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\brecommend\b", "Let's", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bemphasize\b", "Focus on", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:-")
+    if not cleaned:
+        return ""
+
+    lower = cleaned.lower()
+    if not re.search(r"\b(you|we|let's)\b", lower):
+        if any(token in lower for token in ACTIONABLE_COACH_KEYWORDS):
+            cleaned = f"Let's {cleaned[0].lower() + cleaned[1:]}" if len(cleaned) > 1 else cleaned
+    return cleaned
+
+
+def _is_low_value_coach_text(text: str) -> bool:
+    lower = text.lower().strip()
+    if not lower:
+        return True
+    has_low_marker = any(marker in lower for marker in LOW_VALUE_COACH_MARKERS)
+    has_no_detect_pattern = bool(
+        re.search(r"\bno\b.{0,35}\b(detected|observed|noted|issues?)\b", lower)
+    )
+    has_action = any(keyword in lower for keyword in ACTIONABLE_COACH_KEYWORDS)
+    return (has_low_marker or has_no_detect_pattern) and not has_action
 
 
 def _truncate_text_boundary(text: str, max_chars: int) -> str:
@@ -855,3 +949,19 @@ def _merge_speech_variants(
     for rule, lines in updates.items():
         merged[rule] = list(lines)
     return merged
+
+
+def _profile_console_payload(profile: SessionProfile) -> dict[str, Any]:
+    variant_counts = {
+        rule: len(lines)
+        for rule, lines in profile.hazard_profile.speech_variants.items()
+    }
+    return {
+        "aircraft_icao": profile.aircraft_icao,
+        "aircraft_category": profile.aircraft_category,
+        "confidence": round(profile.confidence, 3),
+        "assumptions": profile.assumptions[:5],
+        "hazard_enabled_rules": list(profile.hazard_profile.enabled_rules),
+        "hazard_thresholds": dict(profile.hazard_profile.thresholds),
+        "hazard_speech_variant_counts": variant_counts,
+    }

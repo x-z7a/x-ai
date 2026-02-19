@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from contextlib import suppress
 from typing import Any
@@ -48,7 +49,10 @@ class XPlaneMCPClient:
         return _decode_tool_result(result)
 
     async def speak(self, message: str) -> dict[str, Any]:
-        return await self.call_tool("xplm_speak_string", {"message": message})
+        return await self.call_tool(
+            "xplm_speak_string",
+            {"message": _normalize_tts_message(message)},
+        )
 
     async def command_execute(
         self,
@@ -170,3 +174,26 @@ def _try_parse_json(text: str) -> dict[str, Any] | None:
         return {"value": value}
     except json.JSONDecodeError:
         return None
+
+
+def _normalize_tts_message(text: str) -> str:
+    message = " ".join(str(text).split()).strip()
+    if not message:
+        return ""
+
+    message = re.sub(
+        r"\b(\d+(?:\.\d+)?)\s*kts?\b",
+        r"\1 knots",
+        message,
+        flags=re.IGNORECASE,
+    )
+    message = re.sub(r"\bkt\b", "knots", message, flags=re.IGNORECASE)
+    message = re.sub(
+        r"\b(\d+(?:\.\d+)?)\s*fpm\b",
+        r"\1 feet per minute",
+        message,
+        flags=re.IGNORECASE,
+    )
+    message = re.sub(r"\bAGL\b", "above ground level", message, flags=re.IGNORECASE)
+    message = re.sub(r"\s+", " ", message).strip()
+    return message
