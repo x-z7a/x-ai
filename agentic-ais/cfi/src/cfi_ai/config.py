@@ -33,6 +33,10 @@ def _float_env(name: str, default: float) -> float:
 class CfiConfig:
     xplane_udp_host: str
     xplane_udp_port: int
+    xplane_discovery_enabled: bool
+    xplane_beacon_multicast_group: str
+    xplane_beacon_port: int
+    xplane_beacon_timeout_sec: float
     xplane_udp_local_port: int
     xplane_rref_hz: int
     xplane_retry_sec: float
@@ -104,8 +108,12 @@ class CfiConfig:
         )
 
         return CfiConfig(
-            xplane_udp_host=os.getenv("XPLANE_UDP_HOST", "127.0.0.1").strip(),
+            xplane_udp_host=os.getenv("XPLANE_UDP_HOST", "auto").strip(),
             xplane_udp_port=_int_env("XPLANE_UDP_PORT", 49000),
+            xplane_discovery_enabled=_bool_env("XPLANE_DISCOVERY_ENABLED", default=True),
+            xplane_beacon_multicast_group=os.getenv("XPLANE_BEACON_MULTICAST_GROUP", "239.255.1.1").strip(),
+            xplane_beacon_port=_int_env("XPLANE_BEACON_PORT", 49707),
+            xplane_beacon_timeout_sec=_float_env("XPLANE_BEACON_TIMEOUT_SEC", 5.0),
             xplane_udp_local_port=_int_env("XPLANE_UDP_LOCAL_PORT", 49001),
             xplane_rref_hz=_int_env("XPLANE_RREF_HZ", 10),
             xplane_retry_sec=_float_env("XPLANE_RETRY_SEC", 3.0),
@@ -139,10 +147,18 @@ class CfiConfig:
         )
 
     def validate(self) -> None:
-        if not self.xplane_udp_host:
-            raise ValueError("XPLANE_UDP_HOST is required.")
-        if self.xplane_udp_port <= 0:
-            raise ValueError("XPLANE_UDP_PORT must be > 0.")
+        auto_host = self.xplane_udp_host.strip().lower() in {"", "auto", "discover"}
+        if not self.xplane_discovery_enabled and auto_host:
+            raise ValueError("Set XPLANE_UDP_HOST when XPLANE_DISCOVERY_ENABLED=false.")
+        if not auto_host and self.xplane_udp_port <= 0:
+            raise ValueError("XPLANE_UDP_PORT must be > 0 when using an explicit host.")
+        if self.xplane_discovery_enabled:
+            if not self.xplane_beacon_multicast_group:
+                raise ValueError("XPLANE_BEACON_MULTICAST_GROUP is required.")
+            if self.xplane_beacon_port <= 0:
+                raise ValueError("XPLANE_BEACON_PORT must be > 0.")
+            if self.xplane_beacon_timeout_sec <= 0:
+                raise ValueError("XPLANE_BEACON_TIMEOUT_SEC must be > 0.")
         if self.xplane_udp_local_port <= 0:
             raise ValueError("XPLANE_UDP_LOCAL_PORT must be > 0.")
         if self.xplane_rref_hz <= 0:

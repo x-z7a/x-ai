@@ -119,6 +119,10 @@ class CfiRuntime:
         self._udp = udp_source or XPlaneUdpClient(
             xplane_host=config.xplane_udp_host,
             xplane_port=config.xplane_udp_port,
+            discovery_enabled=config.xplane_discovery_enabled,
+            beacon_multicast_group=config.xplane_beacon_multicast_group,
+            beacon_port=config.xplane_beacon_port,
+            beacon_timeout_sec=config.xplane_beacon_timeout_sec,
             local_port=config.xplane_udp_local_port,
             rref_hz=config.xplane_rref_hz,
             buffer_retention_sec=max(120.0, config.review_window_sec * 4),

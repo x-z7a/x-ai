@@ -13,6 +13,7 @@ from cfi_ai.types import FlightSnapshot, UdpStateSource
 
 RREF_RESPONSE_PREFIX: Final[bytes] = b"RREF,"
 RREF_REQUEST_HEADER: Final[bytes] = b"RREF\x00"
+BEACON_PREFIX: Final[bytes] = b"BECN\x00"
 
 
 DATAREF_BY_KEY: dict[str, str] = {
@@ -72,12 +73,22 @@ class XPlaneUdpClient(UdpStateSource):
         *,
         xplane_host: str,
         xplane_port: int,
+        discovery_enabled: bool,
+        beacon_multicast_group: str,
+        beacon_port: int,
+        beacon_timeout_sec: float,
         local_port: int,
         rref_hz: int,
         buffer_retention_sec: float = 120.0,
         local_host: str = "0.0.0.0",
     ) -> None:
-        self._xplane_addr = (xplane_host, xplane_port)
+        self._xplane_host = xplane_host.strip()
+        self._xplane_port = int(xplane_port)
+        self._discovery_enabled = bool(discovery_enabled)
+        self._beacon_multicast_group = beacon_multicast_group.strip()
+        self._beacon_port = int(beacon_port)
+        self._beacon_timeout_sec = max(0.1, float(beacon_timeout_sec))
+        self._xplane_addr: tuple[str, int] | None = None
         self._local_host = local_host
         self._local_port = local_port
         self._rref_hz = rref_hz
@@ -96,6 +107,10 @@ class XPlaneUdpClient(UdpStateSource):
     async def start(self) -> None:
         if self._running:
             return
+
+        self._xplane_addr = await self._resolve_xplane_addr()
+        if self._xplane_addr is None:
+            raise RuntimeError("Unable to resolve X-Plane UDP endpoint.")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -165,13 +180,40 @@ class XPlaneUdpClient(UdpStateSource):
             await self._subscribe_all(freq_hz=self._rref_hz)
 
     async def _subscribe_all(self, *, freq_hz: int) -> None:
-        if self._socket is None:
+        if self._socket is None or self._xplane_addr is None:
             return
         loop = asyncio.get_running_loop()
         for key, dataref in DATAREF_BY_KEY.items():
             idx = INDEX_BY_KEY[key]
             packet = build_rref_request_packet(freq_hz=freq_hz, index=idx, dataref=dataref)
             await loop.sock_sendto(self._socket, packet, self._xplane_addr)
+
+    async def _resolve_xplane_addr(self) -> tuple[str, int]:
+        if self._should_attempt_beacon_discovery():
+            discovered = await asyncio.to_thread(
+                discover_xplane_via_beacon,
+                multicast_group=self._beacon_multicast_group,
+                beacon_port=self._beacon_port,
+                timeout_sec=self._beacon_timeout_sec,
+            )
+            if discovered is not None:
+                return discovered
+
+        if self._xplane_host and self._xplane_host.lower() not in {"auto", "discover"}:
+            if self._xplane_port <= 0:
+                raise RuntimeError("Explicit X-Plane host configured without valid UDP port.")
+            return (self._xplane_host, self._xplane_port)
+
+        raise RuntimeError("X-Plane UDP endpoint not discovered from BEACON and no explicit host configured.")
+
+    def _should_attempt_beacon_discovery(self) -> bool:
+        if not self._discovery_enabled:
+            return False
+        host = self._xplane_host.lower()
+        if host in {"", "auto", "discover"}:
+            return True
+        # If discovery is enabled and explicit host is set, explicit host wins.
+        return False
 
     def _build_snapshot(self, timestamp_sec: float) -> FlightSnapshot:
         def _f(name: str) -> float | None:
@@ -213,3 +255,60 @@ class XPlaneUdpClient(UdpStateSource):
             on_ground=on_ground,
             stall_warning=stall_warning,
         )
+
+
+def parse_beacon_datagram(payload: bytes, sender_ip: str) -> tuple[str, int] | None:
+    if not payload.startswith(BEACON_PREFIX):
+        return None
+
+    body = payload[len(BEACON_PREFIX) :]
+    if len(body) < 16:
+        return None
+
+    # BECN body layout (X-Plane):
+    #  byte major, byte minor, int host_id, int version, int role, ushort port, char[] name
+    port = struct.unpack_from("<H", body, 14)[0]
+    if port <= 0:
+        return None
+    host = sender_ip.strip()
+    if not host:
+        return None
+    return (host, int(port))
+
+
+def discover_xplane_via_beacon(
+    *,
+    multicast_group: str,
+    beacon_port: int,
+    timeout_sec: float,
+) -> tuple[str, int] | None:
+    group = multicast_group.strip()
+    if not group:
+        return None
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        with suppress(OSError):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind(("", beacon_port))
+
+        mreq = struct.pack("4s4s", socket.inet_aton(group), socket.inet_aton("0.0.0.0"))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+        deadline = time.time() + max(0.1, timeout_sec)
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            sock.settimeout(remaining)
+            try:
+                payload, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                return None
+            parsed = parse_beacon_datagram(payload, sender_ip=addr[0])
+            if parsed is not None:
+                return parsed
+    finally:
+        with suppress(OSError):
+            sock.close()

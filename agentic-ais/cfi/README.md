@@ -43,6 +43,18 @@ Run bounded test mode:
 cfi-coach --duration-sec 120 --dry-run
 ```
 
+## X-Plane Discovery
+
+- By default, CFI discovers X-Plane via UDP multicast `BECN` beacons.
+- Default beacon settings:
+  - `XPLANE_DISCOVERY_ENABLED=true`
+  - `XPLANE_BEACON_MULTICAST_GROUP=239.255.1.1`
+  - `XPLANE_BEACON_PORT=49707`
+- If discovery is unavailable in your network, set explicit:
+  - `XPLANE_UDP_HOST=<xplane-ip>`
+  - `XPLANE_UDP_PORT=49000`
+  - `XPLANE_DISCOVERY_ENABLED=false`
+
 ## CLI Flags
 
 - `--duration-sec <int>` run for a bounded duration

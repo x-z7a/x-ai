@@ -7,7 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cfi_ai.xplane_udp import build_rref_request_packet, parse_rref_datagram
+from cfi_ai.xplane_udp import (
+    BEACON_PREFIX,
+    build_rref_request_packet,
+    parse_beacon_datagram,
+    parse_rref_datagram,
+)
 
 
 class TestUdpPackets(unittest.TestCase):
@@ -32,6 +37,16 @@ class TestUdpPackets(unittest.TestCase):
     def test_parse_rref_invalid_prefix(self) -> None:
         parsed = parse_rref_datagram(b"NOPE")
         self.assertEqual(parsed, {})
+
+    def test_parse_beacon_datagram(self) -> None:
+        # BECN body: byte, byte, int, int, int, ushort, name...
+        body = struct.pack("<BBiiiH", 1, 2, 12345, 120000, 1, 49000) + b"MyXPlane\x00"
+        payload = BEACON_PREFIX + body
+        parsed = parse_beacon_datagram(payload, sender_ip="192.168.1.50")
+        self.assertEqual(parsed, ("192.168.1.50", 49000))
+
+    def test_parse_beacon_invalid(self) -> None:
+        self.assertIsNone(parse_beacon_datagram(b"NOPE", sender_ip="192.168.1.1"))
 
 
 if __name__ == "__main__":

@@ -171,6 +171,10 @@ def _config(tmpdir: str) -> CfiConfig:
     return CfiConfig(
         xplane_udp_host="127.0.0.1",
         xplane_udp_port=49000,
+        xplane_discovery_enabled=False,
+        xplane_beacon_multicast_group="239.255.1.1",
+        xplane_beacon_port=49707,
+        xplane_beacon_timeout_sec=1.0,
         xplane_udp_local_port=49001,
         xplane_rref_hz=10,
         xplane_retry_sec=0.1,
